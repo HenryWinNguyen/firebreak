@@ -1,0 +1,30 @@
+# Root compose: lead-only. Tracks own the included files.
+include:
+  - shopfloor/compose.yml
+  - ops/compose.yml
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: firebreak
+      POSTGRES_PASSWORD: firebreak
+      POSTGRES_DB: firebreak
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U firebreak"]
+      interval: 5s
+      retries: 10
+
+  api:
+    build: .
+    env_file: .env
+    environment:
+      FIREBREAK_DATABASE_URL: postgresql+asyncpg://firebreak:firebreak@postgres:5432/firebreak
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+volumes:
+  pgdata:

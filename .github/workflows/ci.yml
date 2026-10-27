@@ -1,0 +1,41 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: firebreak
+          POSTGRES_PASSWORD: firebreak
+          POSTGRES_DB: firebreak_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U firebreak" --health-interval 5s --health-retries 10
+    env:
+      FIREBREAK_TEST_DATABASE_URL: postgresql+asyncpg://firebreak:firebreak@localhost:5432/firebreak_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: make check
+
+  owned-paths:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: uv run python scripts/check_owned_paths.py --base origin/${{ github.base_ref }}
