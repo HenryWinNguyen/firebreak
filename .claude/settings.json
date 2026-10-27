@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make *)", "Bash(uv *)", "Bash(pytest *)", "Bash(ruff *)", "Bash(mypy *)",
+      "Bash(docker compose *)",
+      "Bash(git status*)", "Bash(git diff*)", "Bash(git log*)", "Bash(git add *)",
+      "Bash(git commit *)", "Bash(git fetch*)", "Bash(git rebase origin/main*)",
+      "Bash(gh pr create *)", "Bash(gh pr view *)", "Bash(gh pr checks *)"
+    ],
+    "deny": [
+      "Bash(git push --force*)", "Bash(git push -f*)", "Bash(git push origin main*)",
+      "Bash(gh repo edit *)", "Bash(gh repo delete *)"
+    ]
+  }
+}
