@@ -335,6 +335,7 @@ def _no_tool_use_echoed(req: LLMRequest) -> bool:
         ({"type": "tool_use", "id": "", "name": "echo", "input": {"text": "a"}},),  # empty
         ({"type": "tool_use", "id": "  ", "name": "echo", "input": {"text": "a"}},),  # blank
         ({"type": "tool_use", "id": 7, "name": "echo", "input": {"text": "a"}},),  # not a str
+        ({"type": "tool_use", "id": "x" * 129, "name": "echo", "input": {"text": "a"}},),  # long
         (
             {"type": "tool_use", "id": "dup", "name": "echo", "input": {"text": "a"}},
             {"type": "tool_use", "id": "dup", "name": "echo", "input": {"text": "b"}},
@@ -482,3 +483,103 @@ async def test_repair_problem_text_is_bounded() -> None:
     text = repair if isinstance(repair, str) else repair[-1]["text"]
     assert len(text) < 1300 and long_key not in text
     assert res.error is not None and len(res.error) < 1100
+
+
+# --- rework round 2 -------------------------------------------------------------------
+
+
+async def test_tool_use_id_of_exactly_128_chars_is_accepted() -> None:
+    tid = "x" * 128
+    h = Harness([tool_response((tid, "echo", {"text": "a"})), cite_last()])
+    res = await h.run()
+    assert res.stopped_reason == "final_output" and res.tool_calls[0].id == tid
+
+
+async def test_max_tokens_tool_turn_is_not_executed() -> None:
+    cut = LLMResponse(
+        model="fake",
+        content=[{"type": "tool_use", "id": "toolu_cut", "name": "echo", "input": {"text": "a"}}],
+        stop_reason="max_tokens",
+        usage=Usage(cost_usd=0.001),
+    )
+    h = Harness([cut, tool_response(ECHO), cite_last()])
+    res = await h.run()
+    assert res.stopped_reason == "final_output"
+    assert [c.id for c in res.tool_calls] == ["toolu_1"]  # the cut-off call never ran
+    retry = h.llm.requests[1]
+    assert _no_tool_use_echoed(retry)
+    assert "max_tokens" in retry.messages[-1]["content"][-1]["text"]  # merged into the task turn
+
+
+async def test_max_tokens_tool_turn_twice_is_an_error() -> None:
+    cut = LLMResponse(
+        model="fake",
+        content=[{"type": "tool_use", "id": "toolu_cut", "name": "echo", "input": {"text": "a"}}],
+        stop_reason="max_tokens",
+        usage=Usage(cost_usd=0.001),
+    )
+    h = Harness([cut, cut])
+    res = await h.run()
+    assert res.stopped_reason == "error" and res.tool_calls == []
+    assert res.error is not None and "max_tokens" in res.error
+
+
+async def test_handler_self_cancel_does_not_affect_siblings() -> None:
+    h = Harness(
+        [tool_response(("t_c", "self_cancel", {}), ECHO), cite_last()],
+        tools=["echo", "self_cancel"],
+    )
+    res = await h.run()
+    assert res.stopped_reason == "final_output"
+    results = last_tool_results(h.llm.requests[1])
+    assert [r["tool_use_id"] for r in results] == ["t_c", "toolu_1"]
+    assert "code=handler_failed" in results[0]["content"] and not results[1]["is_error"]
+
+
+class _StrayCancelGateway(ToolGateway):
+    async def invoke(self, agent_cfg: AgentConfig, tool_name: str, *a: Any, **kw: Any) -> Any:
+        if tool_name == "boom":
+            raise asyncio.CancelledError  # not a cancellation of the run
+        return await super().invoke(agent_cfg, tool_name, *a, **kw)
+
+
+async def test_stray_cancelled_error_from_gateway_is_a_per_call_error() -> None:
+    h = Harness([tool_response(("t_boom", "boom", {}), ECHO), cite_last()], tools=["echo", "boom"])
+    h.gateway = _StrayCancelGateway(h.registry)
+    res = await h.run()
+    assert res.stopped_reason == "final_output"
+    results = last_tool_results(h.llm.requests[1])
+    assert len(results) == 2
+    assert "code=internal_error" in results[0]["content"] and not results[1]["is_error"]
+
+
+async def test_cancelling_the_run_leaves_no_tool_task_running() -> None:
+    h = Harness([], tools=["hang", "self_cancel"])
+    gate = asyncio.Event()
+    finished: list[str] = []
+
+    async def hang(args: NoArgs, ctx: ToolContext) -> ToolOutput:
+        gate.set()
+        try:
+            await asyncio.sleep(60)
+        finally:
+            finished.append("hang")
+        raise AssertionError("unreachable")
+
+    h.registry.register(
+        name="hang",
+        description="x",
+        args_model=NoArgs,
+        handler=hang,
+        access=ToolAccess.READ,
+        timeout_s=60,
+    )
+    h.llm.script = [tool_response(("a", "hang", {}), ("b", "self_cancel", {}))]
+    before = asyncio.all_tasks()
+    task = asyncio.create_task(h.run())
+    await asyncio.wait_for(gate.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished == ["hang"]
+    assert asyncio.all_tasks() - before - {asyncio.current_task()} == set()

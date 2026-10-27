@@ -13,8 +13,9 @@ Bounds and guarantees:
   ``evidence_id`` must exist for this incident (``EvidenceSink.exists``).
 - The model gets exactly **one** repair turn per run. It covers an invalid final
   answer, cited ids that don't exist, and a malformed tool turn (a tool_use with
-  a missing, empty or duplicate id). Ids are never invented, and a malformed
-  turn's tool_use blocks are never echoed back without results.
+  a missing, empty, over-long or duplicate id, or a tool turn cut off by
+  ``stop_reason="max_tokens"``). Ids are never invented, and a malformed turn's
+  tool_use blocks are never run or echoed back without results.
 
 ``stopped_reason`` is ``final_output`` (``output`` is the validated schema),
 ``max_steps``, ``budget`` or ``error`` (``output`` is ``{}`` in all three, and
@@ -156,6 +157,12 @@ def _tool_use_problem(blocks: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _outer_cancel_requested() -> bool:
+    """True if the current task is being cancelled from outside (not a stray CancelledError)."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
+
+
 def _block_name(block: dict[str, Any]) -> str:
     name = block.get("name")
     return name if isinstance(name, str) else ""
@@ -169,31 +176,44 @@ async def _run_tools(
 ) -> list[ToolResult]:
     """Run one turn's tool calls in parallel. Returns exactly one result per block, in order.
 
-    Ids were already validated by ``_tool_use_problem``. An unexpected exception
-    from the gateway becomes that call's tool error and never aborts the sibling
-    calls. Cancellation propagates, and ``gather`` then cancels the siblings.
+    Ids were already validated by ``_tool_use_problem``. The calls run in an
+    ``asyncio.TaskGroup``. Each call is isolated: an unexpected exception, or a
+    ``CancelledError`` the call raised on its own, becomes that call's
+    ``internal_error`` result and never aborts or orphans its siblings. When the
+    run itself is cancelled, the cancellation propagates and the TaskGroup
+    cancels and awaits every sibling, so no tool call outlives the run.
     """
     allowed, excess = blocks[:MAX_TOOL_CALLS_PER_STEP], blocks[MAX_TOOL_CALLS_PER_STEP:]
 
     async def one(block: dict[str, Any]) -> ToolResult:
         name, call_id = _block_name(block), str(block["id"])
-        try:
-            return await gateway.invoke(cfg, name, block.get("input"), ctx, call_id=call_id)
-        except Exception as e:
-            logger.exception(
-                "gateway raised agent=%s tool=%r incident=%s call=%s",
-                cfg.name,
-                name[:64],
-                ctx.incident_id,
-                call_id,
-            )
+
+        def crashed(e: BaseException) -> ToolResult:
             err = ToolInternalError(
                 f"internal error while running the tool ({type(e).__name__}); "
                 "the call did not complete"
             )
             return gateway.error_result(cfg, name, block.get("input"), err, ctx, call_id=call_id)
 
-    results = list(await asyncio.gather(*(one(b) for b in allowed)))
+        log_args = (cfg.name, name[:64], ctx.incident_id, call_id)
+        try:
+            return await gateway.invoke(cfg, name, block.get("input"), ctx, call_id=call_id)
+        except asyncio.CancelledError as e:
+            if _outer_cancel_requested():
+                raise  # the run is being cancelled; the TaskGroup cancels the siblings
+            logger.error(
+                "tool call raised a stray CancelledError agent=%s tool=%r incident=%s call=%s",
+                *log_args,
+                exc_info=e,
+            )
+            return crashed(e)
+        except Exception as e:
+            logger.exception("tool call crashed agent=%s tool=%r incident=%s call=%s", *log_args)
+            return crashed(e)
+
+    async with asyncio.TaskGroup() as tg:
+        tasks = [tg.create_task(one(b)) for b in allowed]
+    results = [t.result() for t in tasks]
     for b in excess:
         err = TooManyToolCalls(
             f"more than {MAX_TOOL_CALLS_PER_STEP} tool calls in one turn; this one was not run"
@@ -315,6 +335,9 @@ async def run_agent(
         tool_blocks = [b for b in response.content if b.get("type") == "tool_use"]
         if tool_blocks:
             problem = _tool_use_problem(tool_blocks)
+            if problem is None and response.stop_reason == "max_tokens":
+                # The turn was cut off: the last tool call's input may be truncated.
+                problem = "the response hit max_tokens, so its tool calls may be incomplete"
             if problem is not None:
                 # Malformed turn: echo back only its non-tool blocks, never unmatched tool_use.
                 if state.repair_used:
@@ -326,7 +349,8 @@ async def run_agent(
                 _append_user_text(
                     messages,
                     f"Your last turn was rejected and none of its tool calls ran: {problem}. "
-                    f"Every tool call needs a unique, non-empty id. {_REPAIR_SUFFIX}",
+                    "Every tool call needs a unique, non-empty id, and a turn must not be "
+                    f"cut off. Make fewer or smaller tool calls. {_REPAIR_SUFFIX}",
                 )
                 continue
             messages.append(

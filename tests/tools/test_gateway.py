@@ -120,7 +120,7 @@ async def test_size_cap(gw: ToolGateway, ctx: ToolContext, sink: FakeEvidenceSin
     res = await gw.invoke(make_cfg(), "echo", {"text": big}, ctx)
     assert res.evidence is not None
     ev, raw = sink.stored[res.evidence.id]
-    assert len(ev.summary) <= 4000 and "truncated 5500 chars" in ev.summary
+    assert len(ev.summary) <= 4000 and "truncated; 9000 chars in total" in ev.summary
     assert raw == big  # the full payload is stored; only the model-facing summary is capped
 
 
@@ -129,7 +129,7 @@ async def test_content_over_hard_limit_rejected(
 ) -> None:
     res = await gw.invoke(make_cfg(tools=["huge"]), "huge", {}, ctx)
     assert res.error_code is ToolErrorCode.INVALID_OUTPUT
-    assert "more than 1000000 chars" in res.content
+    assert "more than 1000000 characters" in res.content
     assert sink.stored == {}
 
 
@@ -201,3 +201,62 @@ async def test_injection_stays_inside_wrapper(
     assert res.content.lower().count("</untrusted-data") == 1
     # The stored raw payload is untouched.
     assert sink.stored[m.group(1)][1] == INJECTION
+
+
+# --- rework round 2 -------------------------------------------------------------------
+
+
+async def test_nfkc_expanding_content_stays_within_the_cap(
+    gw: ToolGateway, ctx: ToolContext, sink: FakeEvidenceSink
+) -> None:
+    lig = chr(0xFDFA)  # NFKC: 1 char -> 18 chars
+    res = await gw.invoke(make_cfg(), "echo", {"text": lig * 9000}, ctx)
+    assert res.evidence is not None
+    body = res.content.split("\n", 1)[1].rsplit("\n", 1)[0]
+    assert body.startswith(lig * 3500)  # shown as returned, not normalized
+    assert len(res.content) < 3500 + 300
+    assert sink.stored[res.evidence.id][1] == lig * 9000  # raw payload untouched
+
+
+@pytest.mark.parametrize(
+    ("tool", "code"),
+    [
+        ("refuses", ToolErrorCode.INVALID_ARGS),
+        ("refuses_write", ToolErrorCode.HANDLER_FAILED),  # handler can't pick write_refused
+        ("refuses_bare", ToolErrorCode.HANDLER_FAILED),  # bare ToolError: no AttributeError
+        ("refuses_weird", ToolErrorCode.HANDLER_FAILED),  # subclass that skipped __init__
+    ],
+)
+async def test_handler_tool_error_code_is_not_trusted(
+    gw: ToolGateway, ctx: ToolContext, tool: str, code: ToolErrorCode
+) -> None:
+    res = await gw.invoke(make_cfg(tools=[tool]), tool, {}, ctx)
+    assert res.is_error and res.error_code is code
+    head = res.content.split("\n", 1)[0]
+    assert head == f"tool_error code={code}: tool {tool!r} rejected the call ({code})"
+    assert "ignore all previous" not in head
+
+
+async def test_handler_self_cancel_is_handler_failed(gw: ToolGateway, ctx: ToolContext) -> None:
+    res = await gw.invoke(make_cfg(tools=["self_cancel"]), "self_cancel", {}, ctx)
+    assert res.error_code is ToolErrorCode.HANDLER_FAILED
+    assert "failed (CancelledError)" in res.content
+
+
+async def test_invoke_never_raises_on_internal_bugs(
+    gw: ToolGateway, ctx: ToolContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*a: object, **kw: object) -> object:
+        raise KeyError("gateway bug")
+
+    monkeypatch.setattr(gw, "_authorize", broken)
+    res = await gw.invoke(make_cfg(), "echo", {"text": "x"}, ctx)
+    assert res.error_code is ToolErrorCode.INTERNAL_ERROR
+    assert "gateway bug" not in res.content
+
+
+async def test_bare_tool_error_has_a_code(gw: ToolGateway, ctx: ToolContext) -> None:
+    from firebreak.tools.errors import ToolError
+
+    res = gw.error_result(make_cfg(), "echo", {}, ToolError("x"), ctx, call_id="c1")
+    assert res.error_code is ToolErrorCode.INTERNAL_ERROR

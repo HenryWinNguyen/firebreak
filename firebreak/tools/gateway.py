@@ -7,9 +7,9 @@
 2. access classification: anything but READ is refused  -> ``WriteToolRefused``
 3. argument validation against the pydantic args model  -> ``InvalidToolArgs``
 4. handler, under a per-tool timeout                    -> ``ToolTimeout`` / ``ToolHandlerFailed``
-5. output checks: shape, hard size limit, query length  -> ``InvalidToolOutput``
-6. size cap (summary shown to the model; raw stored)
-7. ``EvidenceSink.record``, under a timeout             -> ``EvidenceRecordFailed``
+5. output checks: shape, hard length limit, query length -> ``InvalidToolOutput``
+6. render the summary the model sees: defang, then cap (``render_untrusted``)
+7. ``EvidenceSink.record`` (full payload), under a timeout -> ``EvidenceRecordFailed``
 8. wrap the summary in an untrusted-data block (ARCH §8)
 9. ``ToolCallRecord`` + a log line
 
@@ -18,12 +18,16 @@ lists it after): a WRITE tool is refused whatever its arguments, and the model
 never gets validation feedback that would help it shape a WRITE call.
 
 Every refusal and failure becomes a ``ToolResult`` with ``is_error=True``
-that the runtime returns to the model as a tool error. ``invoke`` never raises
-for a refused or failing call. Only cancellation (``BaseException``) propagates.
+that the runtime returns to the model as a tool error. ``invoke`` never raises,
+except ``CancelledError`` when the calling task itself is being cancelled. A
+handler that raises ``CancelledError`` on its own gets ``handler_failed``, and
+any unexpected exception inside the gateway becomes ``internal_error``.
 
 Model-facing error text is always gateway-authored. Anything a handler supplies
 (exception text, or the message of a ``ToolError`` it raised) is shown only as
-capped ``untrusted_detail`` inside an untrusted-data block.
+capped ``untrusted_detail`` inside an untrusted-data block. A handler can't pick
+the error code either: a ``ToolError`` it raises maps to ``invalid_args`` (if it
+is an ``InvalidToolArgs``) or ``handler_failed``.
 """
 
 import asyncio
@@ -46,6 +50,7 @@ from firebreak.tools.errors import (
     ToolError,
     ToolErrorCode,
     ToolHandlerFailed,
+    ToolInternalError,
     ToolNotAllowed,
     ToolTimeout,
     UnknownTool,
@@ -53,17 +58,16 @@ from firebreak.tools.errors import (
     cap_text,
     format_validation_error,
 )
-from firebreak.tools.registry import RegisteredTool, ToolOutput, ToolRegistry
-from firebreak.tools.untrusted import wrap_untrusted
+from firebreak.tools.registry import EVIDENCE_SUMMARY_MAX, RegisteredTool, ToolOutput, ToolRegistry
+from firebreak.tools.untrusted import render_untrusted, wrap_untrusted
 
 logger = logging.getLogger(__name__)
 
-#: Handler content longer than this is rejected outright, before any processing.
+#: Handler content longer than this many characters (not bytes) is rejected outright.
 DEFAULT_MAX_CONTENT_CHARS = 1_000_000
 #: ``Evidence.query`` must be reproducible, so an over-long one is rejected, not truncated.
 MAX_QUERY_CHARS = 4000
 DEFAULT_EVIDENCE_TIMEOUT_S = 10.0
-_TRUNCATION_NOTE = "\n[... truncated {omitted} chars; the full payload is stored as evidence]"
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _MAX_DETAIL_CHARS = 1000
 
@@ -79,16 +83,15 @@ class ToolResult:
     evidence: Evidence | None = None
 
 
-def cap(text: str, limit: int) -> str:
-    """Truncate ``text`` to ``limit`` chars and append a truncation note (< 100 chars)."""
-    if len(text) <= limit:
-        return text
-    return text[:limit] + _TRUNCATION_NOTE.format(omitted=len(text) - limit)
-
-
 def _shown_name(name: str) -> str:
     """A model-supplied tool name, made safe to echo back."""
     return repr(name[:64])
+
+
+def _outer_cancel_requested() -> bool:
+    """True if the current task is being cancelled from outside (not a stray CancelledError)."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
 
 
 class ToolGateway:
@@ -119,15 +122,40 @@ class ToolGateway:
         call_id = call_id or new_id("tc")
         started = time.monotonic()
         try:
-            tool = self._authorize(agent_cfg, tool_name)
-            args = self._validate(tool, raw_args)
-            output = await self._run(tool, args, ctx)
-            evidence = await self._record(tool, output, ctx, call_id)
+            return await self._invoke(agent_cfg, tool_name, raw_args, ctx, call_id, started)
         except ToolError as err:
             return self.error_result(
                 agent_cfg, tool_name, raw_args, err, ctx, call_id=call_id, started=started
             )
+        except Exception as e:
+            logger.exception(
+                "gateway internal error agent=%s tool=%r incident=%s call=%s",
+                agent_cfg.name,
+                tool_name[:64],
+                ctx.incident_id,
+                call_id,
+            )
+            internal = ToolInternalError(
+                f"internal error while running the tool ({type(e).__name__}); "
+                "the call did not complete"
+            )
+            return self.error_result(
+                agent_cfg, tool_name, raw_args, internal, ctx, call_id=call_id, started=started
+            )
 
+    async def _invoke(
+        self,
+        agent_cfg: AgentConfig,
+        tool_name: str,
+        raw_args: object,
+        ctx: ToolContext,
+        call_id: str,
+        started: float,
+    ) -> ToolResult:
+        tool = self._authorize(agent_cfg, tool_name)
+        args = self._validate(tool, raw_args)
+        output = await self._run(tool, args, ctx)
+        evidence = await self._record(tool, output, ctx, call_id)
         record = ToolCallRecord(
             id=call_id,
             agent=agent_cfg.name,
@@ -146,7 +174,12 @@ class ToolGateway:
             evidence.id,
             record.duration_ms,
         )
-        content = wrap_untrusted(evidence.summary, source=tool.name, evidence_id=evidence.id)
+        content = wrap_untrusted(
+            evidence.summary,
+            source=tool.name,
+            evidence_id=evidence.id,
+            max_chars=EVIDENCE_SUMMARY_MAX,
+        )
         return ToolResult(record=record, content=content, is_error=False, evidence=evidence)
 
     def error_result(
@@ -161,32 +194,32 @@ class ToolGateway:
         started: float | None = None,
     ) -> ToolResult:
         """Turn a ``ToolError`` into the tool error the model sees, and log it."""
-        message = cap_text(err.message)
+        code = err.code
+        message = cap_text(str(getattr(err, "message", None) or type(err).__name__))
+        detail = getattr(err, "untrusted_detail", None)
         logger.warning(
             "tool call refused agent=%s tool=%r incident=%s call=%s code=%s: %s",
             agent_cfg.name,
             tool_name[:64],
             ctx.incident_id,
             call_id,
-            err.code,
+            code,
             message,
         )
-        content = f"tool_error code={err.code}: {message}"
-        if err.untrusted_detail:
+        content = f"tool_error code={code}: {message}"
+        if isinstance(detail, str) and detail:
             source = tool_name if _SAFE_TOKEN.match(tool_name) else "unknown"
-            content += "\n" + wrap_untrusted(
-                cap(err.untrusted_detail, _MAX_DETAIL_CHARS), source=source
-            )
+            content += "\n" + wrap_untrusted(detail, source=source, max_chars=_MAX_DETAIL_CHARS)
         record = ToolCallRecord(
             id=call_id,
             agent=agent_cfg.name,
             tool=tool_name,
             arguments=_record_args(raw_args),
             ok=False,
-            error=f"{err.code}: {message}",
+            error=f"{code}: {message}",
             duration_ms=_elapsed_ms(started) if started is not None else 0,
         )
-        return ToolResult(record=record, content=content, is_error=True, error_code=err.code)
+        return ToolResult(record=record, content=content, is_error=True, error_code=code)
 
     # --- steps --------------------------------------------------------------------------
 
@@ -231,13 +264,12 @@ class ToolGateway:
         try:
             async with deadline:
                 output = await tool.handler(args, ctx)
+        except asyncio.CancelledError as e:
+            if _outer_cancel_requested():
+                raise  # the run is being cancelled: propagate
+            raise self._handler_failed(tool, ctx, e) from e
         except ToolError as e:
-            # A handler may refuse with a typed error. Keep its code, but its text is
-            # handler-provided, so it only travels as untrusted detail.
-            raise type(e)(
-                f"tool {tool.name!r} rejected the call ({e.code})",
-                untrusted_detail="\n".join(x for x in (e.message, e.untrusted_detail) if x),
-            ) from e
+            raise self._handler_refused(tool, e) from e
         except TimeoutError as e:
             if deadline.expired():
                 raise ToolTimeout(f"tool {tool.name!r} timed out after {tool.timeout_s:g}s") from e
@@ -255,13 +287,13 @@ class ToolGateway:
             raise InvalidToolOutput(f"tool {tool.name!r} returned a malformed result")
         if len(output.content) > self._max_content_chars:
             logger.error(
-                "tool %r returned %d chars (limit %d)",
+                "tool %r returned %d chars (limit %d chars)",
                 tool.name,
                 len(output.content),
                 self._max_content_chars,
             )
             raise InvalidToolOutput(
-                f"tool {tool.name!r} returned more than {self._max_content_chars} chars; "
+                f"tool {tool.name!r} returned more than {self._max_content_chars} characters; "
                 "narrow the query"
             )
         if len(output.query) > MAX_QUERY_CHARS:
@@ -270,7 +302,20 @@ class ToolGateway:
         return output
 
     @staticmethod
-    def _handler_failed(tool: RegisteredTool, ctx: ToolContext, e: Exception) -> ToolError:
+    def _handler_refused(tool: RegisteredTool, e: ToolError) -> ToolError:
+        """A ToolError raised by a handler: its code and text are not trusted."""
+        cls: type[ToolError] = (
+            InvalidToolArgs if isinstance(e, InvalidToolArgs) else ToolHandlerFailed
+        )
+        text = getattr(e, "message", None) or str(e)
+        extra = getattr(e, "untrusted_detail", None)
+        detail = "\n".join(x for x in (text, extra) if isinstance(x, str) and x)
+        return cls(
+            f"tool {tool.name!r} rejected the call ({cls.code})", untrusted_detail=detail or None
+        )
+
+    @staticmethod
+    def _handler_failed(tool: RegisteredTool, ctx: ToolContext, e: BaseException) -> ToolError:
         logger.warning(
             "tool handler raised tool=%s incident=%s", tool.name, ctx.incident_id, exc_info=e
         )
@@ -281,7 +326,8 @@ class ToolGateway:
     async def _record(
         self, tool: RegisteredTool, output: ToolOutput, ctx: ToolContext, call_id: str
     ) -> Evidence:
-        summary = cap(output.content, tool.max_output_chars)
+        # The size cap is applied last, on the exact (defanged) text the model will see.
+        summary = render_untrusted(output.content, tool.max_output_chars)
         ev_id = new_id("ev")
         evidence = Evidence(
             id=ev_id,

@@ -15,7 +15,7 @@ from firebreak.models.agents import AgentConfig
 from firebreak.models.evidence import Evidence, EvidenceKind
 from firebreak.models.llm import LLMRequest, LLMResponse, ToolAccess, Usage
 from firebreak.tools.context import ToolContext
-from firebreak.tools.errors import InvalidToolArgs
+from firebreak.tools.errors import InvalidToolArgs, ToolError, WriteToolRefused
 from firebreak.tools.registry import ToolOutput, ToolRegistry
 
 INCIDENT = "inc_test"
@@ -190,6 +190,27 @@ async def long_query(args: NoArgs, ctx: ToolContext) -> ToolOutput:
     return ToolOutput(kind=EvidenceKind.LOG_LINES, query="q" * 5000, content="ok")
 
 
+async def self_cancel(args: NoArgs, ctx: ToolContext) -> ToolOutput:
+    raise asyncio.CancelledError  # a handler bug, not a cancellation of the run
+
+
+async def refuses_write(args: NoArgs, ctx: ToolContext) -> ToolOutput:
+    raise WriteToolRefused(INJECTION)  # tries to pick a code the model would trust
+
+
+async def refuses_bare(args: NoArgs, ctx: ToolContext) -> ToolOutput:
+    raise ToolError("bare tool error")
+
+
+class WeirdToolError(ToolError):
+    def __init__(self) -> None:  # skips ToolError.__init__: no message/untrusted_detail
+        Exception.__init__(self, "weird")
+
+
+async def refuses_weird(args: NoArgs, ctx: ToolContext) -> ToolOutput:
+    raise WeirdToolError()
+
+
 class ExplodingArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str
@@ -225,6 +246,10 @@ def make_registry() -> ToolRegistry:
     add("huge", huge)
     add("long_query", long_query)
     add("exploding", echo, ExplodingArgs)
+    add("self_cancel", self_cancel)
+    add("refuses_write", refuses_write)
+    add("refuses_bare", refuses_bare)
+    add("refuses_weird", refuses_weird)
     return reg
 
 

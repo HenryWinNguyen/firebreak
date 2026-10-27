@@ -34,7 +34,7 @@ class ToolError(Exception):
     inside an untrusted-data block.
     """
 
-    code: ToolErrorCode
+    code: ToolErrorCode = ToolErrorCode.INTERNAL_ERROR
 
     def __init__(self, message: str, *, untrusted_detail: str | None = None) -> None:
         super().__init__(message)
