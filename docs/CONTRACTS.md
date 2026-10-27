@@ -21,7 +21,7 @@ are a checkpoint.
 | `alert` | `Alert`, `AlertSource`, `AlertStatus`, `AlertmanagerWebhook`, `AlertmanagerAlert` | ingest (T-021) → grouper (T-023), DB (T-022) |
 | `incident` | `Incident`, `IncidentState`, `TERMINAL_STATES`, `GroupingDecision`, `IncidentGrouper` (Protocol) | grouper (T-023) ← ingest (T-021) |
 | `evidence` | `Evidence`, `EvidenceKind`, `Finding`, `SpecialistReport`, `EvidenceSink` (Protocol) | tool gateway (T-032) → DB/core |
-| `reasoning` | `Hypothesis`, `RootCauseCategory`, `ProposedAction`, `ActionType`, `RiskTier` | synthesizer/remediator → policy, evals |
+| `reasoning` | `Hypothesis`, `RootCauseCategory`, `InvestigationReport`, `finding_ref`, `ProposedAction`, `ActionType`, `RiskTier` | synthesizer/remediator → policy, evals |
 | `llm` | `LLMClient` (Protocol), `LLMRequest`, `LLMResponse`, `ToolSpec`, `ToolAccess`, `Usage` | llm (T-031) → agent runtime (T-032) |
 | `agents` | `AgentConfig`, `ToolCallRecord`, `AgentRunResult` | agent runtime (T-032) → workflows |
 
@@ -30,8 +30,9 @@ Rules:
 - All datetimes are timezone-aware UTC.
 - `ProposedAction.risk_tier` is set only by the policy engine.
 - `Evidence.raw_ref`: the tool gateway proposes the key (`evidence/<incident_id>/<evidence_id>`). The `EvidenceSink` may replace it, and the `Evidence` returned by `record` is authoritative.
-- `LLMRequest.fallback_model`: the client uses it, when set, in preference to any constructor-level fallback map.
+- `LLMRequest.fallback_model`: the only fallback the client uses (v1.3: no built-in fallback map). Unset → no fallback. Each call is priced at the model that call requested (the fallback call requests the fallback model).
 - `Finding.evidence_ids` must be non-empty. The runtime also checks they exist with `EvidenceSink.exists`.
+- `InvestigationReport` (v1.3): `Hypothesis.supporting_findings`/`contradicting_findings` are refs `f<index>` into the report's own `findings`; ranks are exactly `1..n`, at most 3 hypotheses. The single-agent baseline (M3) returns it; the synthesizer (M5) will too.
 
 ## 2. Shopfloor (target system)
 
@@ -119,6 +120,23 @@ Alertmanager → `POST http://api:8000/webhooks/alertmanager` with header
 | Alertmanager | 9093 |
 | Loki | 3100 |
 | Grafana | 3000 |
+
+### 3.4 Read tools for agents (v1.3)
+Registered by `firebreak/tools/read_tools.py`; adapters in `firebreak/tools/adapters/`. All are
+`ToolAccess.READ`, all go through the gateway, and every result is recorded as `Evidence`.
+
+| Tool | Args | Backend | EvidenceKind |
+|---|---|---|---|
+| `promql_query` | `query`, optional `at` (aware UTC) | Prometheus `/api/v1/query` | `metric_series` |
+| `promql_range` | `query`, `minutes_back` (1–120), `step_seconds` (5–600) | Prometheus `/api/v1/query_range` | `metric_series` |
+| `list_metrics` | optional `match` (metric-name prefix) | Prometheus `/api/v1/label/__name__/values` | `metric_series` |
+| `logql_query` | `query`, `minutes_back` (1–120), `limit` (1–500) | Loki `/loki/api/v1/query_range` | `log_lines` |
+| `recent_deploys` | `service` (gateway/orders/inventory), `limit` (1–20) | Shopfloor `GET /admin/deploys` | `deploy` |
+| `service_graph` | none | `config/service_graph.yaml` | `config` |
+
+**Never exposed to agents:** `/admin/chaos` (it would leak the injected fault, i.e. the eval
+ground truth), any POST admin endpoint, Alertmanager silences. Adapter settings use the
+`FIREBREAK_TOOLS_` prefix and live in `firebreak/tools/` (CONTRACTS §4).
 
 ## 4. Ownership of shared files
 | Path | Owner |
