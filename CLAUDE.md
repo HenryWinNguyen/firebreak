@@ -28,4 +28,17 @@ Read [docs/AGENT_WORKFLOW.md](./docs/AGENT_WORKFLOW.md). The short version:
 
 ## Conventions
 
-(Filled in at M0: Python 3.12, uv, ruff, mypy --strict, pytest, Make targets.)
+- **Python 3.12 + uv.** `make install` once per worktree (copy `.env.example` → `.env` if
+  `.worktreeinclude` didn't bring it).
+- **Checks:** `make check` (ruff lint + format check, mypy --strict on `firebreak/` and
+  `scripts/`, pytest). `make test-<dir>` runs `tests/<dir>`. `make owned` runs merge gate G2.
+- **Stack:** `make up` / `make down` (Postgres + API, plus whatever `shopfloor/compose.yml` and
+  `ops/compose.yml` define). Ports are in `docs/CONTRACTS.md` §3.3.
+- **Tests:** mirror the package path (`firebreak/ingest/x.py` → `tests/ingest/test_x.py`). Tests
+  that need Postgres are marked `db` and read `FIREBREAK_TEST_DATABASE_URL`. Full-stack tests
+  are marked `integration` and are skipped unless `FIREBREAK_INTEGRATION=1`.
+- **Errors:** no bare `except`, no swallowed exceptions. Raise typed errors, or log with context
+  and re-raise.
+- **Contracts:** import types from `firebreak.models`. Never redefine them locally.
+- **Branches:** builders use `t-<id>-<slug>` (e.g. `t-021-ingest`). The PR title starts with the task id.
+- **Shopfloor** is its own uv project under `shopfloor/` (excluded from the root mypy run).

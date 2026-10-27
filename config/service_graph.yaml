@@ -1,0 +1,11 @@
+# Service dependency graph for Shopfloor (CONTRACTS §2.6). Lead-only.
+# Alerts on services in the same cluster group into one incident (ARCH §3).
+clusters:
+  shopfloor:
+    services: [gateway, orders, inventory, postgres, redis]
+edges:            # caller -> callee
+  - [gateway, orders]
+  - [orders, inventory]
+  - [orders, postgres]
+  - [orders, redis]
+  - [inventory, postgres]

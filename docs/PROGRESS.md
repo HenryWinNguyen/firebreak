@@ -5,10 +5,30 @@ milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 
 ## Current status
 
-**Planning.** Scope, architecture, and multi-session build workflow drafted. No code yet. Next is
-**M0**: repo skeleton, Docker Compose and CI.
+**M0 complete. ⏸ Waiting on Henry at CP0** (see block below).
+Repo: https://github.com/HenryWinNguyen/firebreak (public).
+
+## ⏸ Waiting on Henry: CP0
+
+Review before anything runs in parallel:
+1. `docs/CONTRACTS.md` + `firebreak/models/`: are the seams right?
+2. `docs/tasks/` (T-011…T-032) + `BOARD.md`: is the split and the first wave right?
+3. Say "go" and the lead spawns the first wave: **T-011, T-022, T-032**.
 
 ## Log
+
+### 2026-10-27: M0 skeleton + contracts v1
+- uv project (Python 3.12), flat `firebreak/` package layout, ruff + mypy --strict + pytest.
+  `make check` is green (15 tests).
+- Contracts v1: `firebreak/models/` (alert, incident, evidence, reasoning, llm, agents) +
+  `docs/CONTRACTS.md` (Shopfloor API, chaos flags, metrics, log format, alert rules, webhook,
+  ports, file ownership).
+- `scripts/check_owned_paths.py` (merge gate G2) + tests. GitHub Actions CI: check job with a
+  Postgres service + owned-paths job on PRs.
+- Docker: API image + root compose (Postgres + API, includes stubs for `shopfloor/` and `ops/`).
+  `make up` → `/healthz` OK.
+- Task specs for M1 (T-011–014), M2 (T-021–024), runtime (T-031, T-032) + BOARD.
+- Decision: in M2 the grouping window is DB-backed. M5 moves it into a Temporal timer (T-023 notes).
 
 ### 2026-10-27: Autonomous operating model
 - Team: 1 lead (Opus) + max 3 builder subagents (Sonnet, one task each, own worktree).
