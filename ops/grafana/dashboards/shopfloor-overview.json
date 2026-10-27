@@ -1,0 +1,51 @@
+{
+  "uid": "shopfloor-overview",
+  "title": "Shopfloor overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "timeseries", "title": "Requests per second",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [{ "refId": "A", "legendFormat": "{{service}}", "expr": "sum by (service) (rate(http_requests_total[1m]))" }]
+    },
+    {
+      "id": 2, "type": "timeseries", "title": "Error rate (5xx)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+      "targets": [{ "refId": "A", "legendFormat": "{{service}}", "expr": "sum by (service) (rate(http_requests_total{status=~\"5..\"}[1m])) / sum by (service) (rate(http_requests_total[1m]))" }]
+    },
+    {
+      "id": 3, "type": "timeseries", "title": "p95 latency",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [{ "refId": "A", "legendFormat": "{{service}}", "expr": "histogram_quantile(0.95, sum by (service, le) (rate(http_request_duration_seconds_bucket[1m])))" }]
+    },
+    {
+      "id": 4, "type": "timeseries", "title": "DB pool usage",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+      "targets": [{ "refId": "A", "legendFormat": "{{service}}", "expr": "sum by (service) (db_pool_in_use) / sum by (service) (db_pool_size)" }]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Memory (RSS)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [{ "refId": "A", "legendFormat": "{{service}}", "expr": "process_resident_memory_bytes{job=~\"gateway|orders|inventory\"}" }]
+    },
+    {
+      "id": 6, "type": "logs", "title": "Logs",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "targets": [{ "refId": "A", "expr": "{service=~\"gateway|orders|inventory\"}" }]
+    }
+  ]
+}
