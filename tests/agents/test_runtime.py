@@ -583,3 +583,33 @@ async def test_cancelling_the_run_leaves_no_tool_task_running() -> None:
         await task
     assert finished == ["hang"]
     assert asyncio.all_tasks() - before - {asyncio.current_task()} == set()
+
+
+async def test_task_cancelled_without_run_cancel_is_an_internal_error() -> None:
+    h = Harness(
+        [tool_response(("t_c", "cancels_self", {}), ECHO), cite_last()],
+        tools=["echo", "cancels_self"],
+    )
+
+    async def cancels_self(args: NoArgs, ctx: ToolContext) -> ToolOutput:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()  # cancels its own task; the run is not being cancelled
+        await asyncio.sleep(0)
+        raise AssertionError("unreachable")
+
+    h.registry.register(
+        name="cancels_self",
+        description="x",
+        args_model=NoArgs,
+        handler=cancels_self,
+        access=ToolAccess.READ,
+        timeout_s=5,
+    )
+    res = await h.run()  # must not raise CancelledError
+    assert res.stopped_reason == "final_output"
+    results = last_tool_results(h.llm.requests[1])
+    assert [r["tool_use_id"] for r in results] == ["t_c", "toolu_1"]  # one result per tool_use
+    assert results[0]["is_error"] and "code=internal_error" in results[0]["content"]
+    assert not results[1]["is_error"]
+    assert [c.id for c in res.tool_calls] == ["t_c", "toolu_1"]

@@ -1,8 +1,13 @@
 """AnthropicLLMClient tests over a fake HTTP transport. No network."""
 
 import json
+import logging
+import math
+import os
 import random
 from collections.abc import Callable
+from datetime import UTC, datetime
+from email.utils import format_datetime
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +30,7 @@ from firebreak.llm import (
     build_llm_client,
     fixture_key,
 )
-from firebreak.models.llm import LLMRequest, ToolSpec, Usage
+from firebreak.models.llm import LLMRequest, LLMResponse, ToolSpec, Usage
 
 OPUS = "claude-opus-5-5"
 SONNET = "claude-sonnet-5-5"
@@ -58,7 +63,7 @@ class Fake:
 
 
 def make_client(
-    fake: Fake, *, fallbacks: dict[str, str] | None = None, **settings: Any
+    fake: Fake, *, now: datetime | None = None, **settings: Any
 ) -> tuple[AnthropicLLMClient, list[float]]:
     sleeps: list[float] = []
 
@@ -70,7 +75,7 @@ def make_client(
     client = AnthropicLLMClient(
         LLMSettings(**settings),
         client=sdk,
-        fallbacks=fallbacks,
+        clock=(lambda: now) if now else (lambda: datetime.now(UTC)),
         limiter=TokenBucket(6000),
         sleep=sleep,
         rng=random.Random(0),
@@ -78,9 +83,10 @@ def make_client(
     return client, sleeps
 
 
-def req(model: str = OPUS) -> LLMRequest:
+def req(model: str = OPUS, fallback_model: str | None = None) -> LLMRequest:
     return LLMRequest(
         model=model,
+        fallback_model=fallback_model,
         system="You are an SRE.",
         messages=[{"role": "user", "content": "why 500s?"}],
         tools=[
@@ -130,7 +136,7 @@ async def test_retries_then_succeeds_with_jittered_backoff() -> None:
 
 async def test_exhausted_retries_without_fallback_raises() -> None:
     fake = Fake(lambda r: err(503))
-    client, sleeps = make_client(fake, fallbacks={})
+    client, sleeps = make_client(fake)
     with pytest.raises(LLMRetriesExhausted) as ei:
         await client.complete(req())
     assert ei.value.status_code == 503
@@ -146,20 +152,141 @@ async def test_fallback_model_after_retries_exhausted() -> None:
         return httpx2.Response(200, json=message_json(SONNET))
 
     fake = Fake(handler)
-    client, _ = make_client(fake, fallbacks={OPUS: SONNET})
-    resp = await client.complete(req())
+    client, _ = make_client(fake)
+    resp = await client.complete(req(fallback_model=SONNET))
     assert [r["model"] for r in fake.requests] == [OPUS] * 5 + [SONNET]
     assert resp.model == SONNET
     # cost priced at the model that actually answered
     assert resp.usage.cost_usd == pytest.approx((100 * 2.0 + 50 * 10.0) / 1e6)
 
 
+async def test_no_fallback_when_fallback_model_unset() -> None:
+    # No built-in opus->sonnet or sonnet->haiku default: unset means never.
+    for model in (OPUS, SONNET):
+        fake = Fake(lambda r: err(529))
+        client, _ = make_client(fake)
+        with pytest.raises(LLMRetriesExhausted):
+            await client.complete(req(model))
+        assert {r["model"] for r in fake.requests} == {model}
+        assert len(fake.requests) == 5
+
+
+async def test_fallback_only_to_the_requested_fallback_model() -> None:
+    fake = Fake(lambda r: err(503))
+    client, _ = make_client(fake)
+    with pytest.raises(LLMRetriesExhausted):
+        await client.complete(req(OPUS, fallback_model=HAIKU))
+    assert [r["model"] for r in fake.requests] == [OPUS] * 5 + [HAIKU] * 5  # no chain beyond it
+
+
+async def test_unpriced_answering_model_uses_requested_model_price() -> None:
+    body = message_json("claude-opus-5-5-20991231")
+    client, _ = make_client(Fake(lambda r: httpx2.Response(200, json=body)))
+    resp = await client.complete(req(OPUS, fallback_model=HAIKU))
+    assert resp.usage.cost_usd == pytest.approx((100 * 4.0 + 50 * 20.0) / 1e6)  # Opus, not Haiku
+
+
+async def test_unknown_model_costs_nan_and_warns_once(caplog: pytest.LogCaptureFixture) -> None:
+    body = message_json("mystery-model")
+    client, _ = make_client(Fake(lambda r: httpx2.Response(200, json=body)))
+    with caplog.at_level(logging.WARNING, logger="firebreak.llm.client"):
+        a = await client.complete(req("mystery-model"))
+        b = await client.complete(req("mystery-model"))
+    assert math.isnan(a.usage.cost_usd) and math.isnan(b.usage.cost_usd)
+    assert len([r for r in caplog.records if "no pricing" in r.getMessage()]) == 1
+
+
+async def test_max_retries_zero_makes_exactly_one_attempt() -> None:
+    fake = Fake(lambda r: err(529))
+    client, sleeps = make_client(fake, max_retries=0)
+    with pytest.raises(LLMRetriesExhausted):
+        await client.complete(req())
+    assert len(fake.requests) == 1 and sleeps == []
+
+
+def retry_after_response(status: int, value: str) -> httpx2.Response:
+    return httpx2.Response(
+        status,
+        headers={"retry-after": value},
+        json={"type": "error", "error": {"type": "x", "message": "slow down"}},
+    )
+
+
+@pytest.mark.parametrize("status", [429, 529])
+async def test_retry_after_seconds_is_honored(status: int) -> None:
+    calls = iter([retry_after_response(status, "7")])
+    fake = Fake(lambda r: next(calls, None) or httpx2.Response(200, json=message_json(OPUS)))
+    client, sleeps = make_client(fake)
+    await client.complete(req())
+    assert sleeps == [7.0]
+
+
+async def test_retry_after_is_capped_by_max_backoff() -> None:
+    calls = iter([retry_after_response(429, "3600")])
+    fake = Fake(lambda r: next(calls, None) or httpx2.Response(200, json=message_json(OPUS)))
+    client, sleeps = make_client(fake, backoff_max_seconds=10)
+    await client.complete(req())
+    assert sleeps == [10.0]
+
+
+async def test_retry_after_http_date_is_honored() -> None:
+    now = datetime(2026, 10, 27, 12, 0, 0, tzinfo=UTC)
+    when = format_datetime(datetime(2026, 10, 27, 12, 0, 5, tzinfo=UTC), usegmt=True)
+    calls = iter([retry_after_response(529, when)])
+    fake = Fake(lambda r: next(calls, None) or httpx2.Response(200, json=message_json(OPUS)))
+    client, sleeps = make_client(fake, now=now)
+    await client.complete(req())
+    assert sleeps == [5.0]
+
+
+async def test_retry_after_ignored_on_other_statuses_and_garbage() -> None:
+    calls = iter([retry_after_response(500, "25"), retry_after_response(429, "soon")])
+    fake = Fake(lambda r: next(calls, None) or httpx2.Response(200, json=message_json(OPUS)))
+    client, sleeps = make_client(fake)
+    await client.complete(req())
+    assert len(sleeps) == 2 and all(d <= 2 for d in sleeps)  # jittered backoff, not 25
+
+
+def test_fixture_write_is_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = FixtureStore(tmp_path)
+    response = LLMResponse(
+        model=OPUS,
+        content=[{"type": "text", "text": "hi"}],
+        stop_reason="end_turn",
+        usage=Usage(),
+    )
+    key = store.save(req(), response)
+    original = store.path_for(key).read_text()
+
+    replaced: list[tuple[str, str]] = []
+    real_replace = os.replace
+
+    def spy(src: Any, dst: Any) -> None:
+        assert Path(src).exists() and Path(src).parent == tmp_path and str(src) != str(dst)
+        replaced.append((str(src), str(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", spy)
+    store.save(req(), response)
+    assert replaced == [(replaced[0][0], str(store.path_for(key)))]
+    assert store.path_for(key).read_text() == original
+    assert [p.name for p in tmp_path.iterdir()] == [f"{key}.json"]  # no temp file left
+
+    def boom(src: Any, dst: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(OSError, match="disk full"):
+        store.save(req().model_copy(update={"system": "other"}), response)
+    assert [p.name for p in tmp_path.iterdir()] == [f"{key}.json"]  # failed write cleaned up
+
+
 @pytest.mark.parametrize("status", [400, 401, 404])
 async def test_non_retryable_raises_typed_error_immediately(status: int) -> None:
     fake = Fake(lambda r: err(status))
-    client, sleeps = make_client(fake, fallbacks={OPUS: SONNET})
+    client, sleeps = make_client(fake)
     with pytest.raises(LLMError) as ei:
-        await client.complete(req())
+        await client.complete(req(fallback_model=SONNET))
     assert not isinstance(ei.value, LLMRetriesExhausted)
     assert ei.value.status_code == status
     assert isinstance(ei.value.__cause__, anthropic.APIStatusError)

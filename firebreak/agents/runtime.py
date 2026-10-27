@@ -177,9 +177,13 @@ async def _run_tools(
     """Run one turn's tool calls in parallel. Returns exactly one result per block, in order.
 
     Ids were already validated by ``_tool_use_problem``. The calls run in an
-    ``asyncio.TaskGroup``. Each call is isolated: an unexpected exception, or a
-    ``CancelledError`` the call raised on its own, becomes that call's
-    ``internal_error`` result and never aborts or orphans its siblings. When the
+    ``asyncio.TaskGroup``. Each call is isolated and never aborts or orphans its
+    siblings. A handler that raises ``CancelledError`` on its own gets
+    ``handler_failed`` from the gateway. ``internal_error`` is for everything
+    outside the gateway's handler path: an unexpected exception from the gateway
+    itself, a stray ``CancelledError`` raised outside the handler, or a call
+    task that ends up ``cancelled()`` without the run being cancelled (for
+    example a handler that cancels its own task). When the
     run itself is cancelled, the cancellation propagates and the TaskGroup
     cancels and awaits every sibling, so no tool call outlives the run.
     """
@@ -213,7 +217,28 @@ async def _run_tools(
 
     async with asyncio.TaskGroup() as tg:
         tasks = [tg.create_task(one(b)) for b in allowed]
-    results = [t.result() for t in tasks]
+    results: list[ToolResult] = []
+    for b, t in zip(allowed, tasks, strict=True):
+        if t.cancelled():
+            # Only reachable when the run itself is not being cancelled (the TaskGroup
+            # would have raised): the call cancelled its own task. Don't leak it.
+            name, call_id = _block_name(b), str(b["id"])
+            logger.error(
+                "tool task ended cancelled without a run cancel agent=%s tool=%r "
+                "incident=%s call=%s",
+                cfg.name,
+                name[:64],
+                ctx.incident_id,
+                call_id,
+            )
+            cancelled_err = ToolInternalError(
+                "internal error while running the tool (CancelledError); the call did not complete"
+            )
+            results.append(
+                gateway.error_result(cfg, name, b.get("input"), cancelled_err, ctx, call_id=call_id)
+            )
+        else:
+            results.append(t.result())
     for b in excess:
         err = TooManyToolCalls(
             f"more than {MAX_TOOL_CALLS_PER_STEP} tool calls in one turn; this one was not run"
