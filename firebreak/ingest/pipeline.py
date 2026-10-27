@@ -15,20 +15,21 @@ async def ingest(
 ) -> list[GroupingDecision]:
     """Return one decision per alert, in order.
 
-    - Duplicate (``insert_if_new`` is False): ``duplicate=True``, not sent to the grouper.
-    - New resolved alert: stored, but never opens an incident (not sent to the grouper).
-    - New firing alert: stored first, then assigned by the grouper.
+    - Resolved alert: stored if new, never sent to the grouper (``incident_id=None``).
+    - Firing alert: stored if new, then ALWAYS sent to the grouper, even when it was already
+      stored. The grouper is idempotent, so replay recovers an alert that was inserted but
+      never grouped (grouper error or crash mid-batch) and reports ``duplicate=True`` for
+      one already linked.
 
-    ``incident_id`` is ``""`` when no incident is involved (duplicate or resolved).
-    Exceptions from the repo or grouper propagate; alerts already inserted stay inserted
-    and a replay will report them as duplicates.
+    Exceptions from the repo or grouper propagate; replaying the webhook is the retry.
     """
     decisions: list[GroupingDecision] = []
     for alert in alerts:
-        if not await repo.insert_if_new(alert):
-            decisions.append(GroupingDecision(incident_id="", created=False, duplicate=True))
-        elif alert.status is AlertStatus.RESOLVED:
-            decisions.append(GroupingDecision(incident_id="", created=False, duplicate=False))
+        is_new = await repo.insert_if_new(alert)
+        if alert.status is AlertStatus.RESOLVED:
+            decisions.append(
+                GroupingDecision(incident_id=None, created=False, duplicate=not is_new)
+            )
         else:
             decisions.append(await grouper.assign(alert))
     return decisions

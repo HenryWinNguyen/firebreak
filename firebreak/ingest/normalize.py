@@ -2,9 +2,10 @@
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field, StringConstraints
 
 from firebreak.models.alert import (
     Alert,
@@ -13,6 +14,14 @@ from firebreak.models.alert import (
     AlertStatus,
 )
 from firebreak.models.common import Severity
+
+MAX_ALERTS = 500
+MAX_LABELS = 64
+MAX_VALUE_LEN = 2000
+_ZERO_YEAR = 1  # Alertmanager sends 0001-01-01T00:00:00Z for "no end"
+
+Short = Annotated[str, StringConstraints(min_length=1, max_length=256)]
+Long = Annotated[str, StringConstraints(max_length=MAX_VALUE_LEN)]
 
 
 class NormalizationError(ValueError):
@@ -26,20 +35,24 @@ class NormalizationError(ValueError):
 class GenericWebhook(BaseModel):
     """Payload for ``POST /webhooks/generic``: one alert in already-normalized shape."""
 
-    alertname: str = Field(min_length=1)
-    service: str = Field(min_length=1)
+    alertname: Short
+    service: Short
     severity: Severity = Severity.WARNING
-    summary: str = ""
+    summary: Long = ""
     status: AlertStatus = AlertStatus.FIRING
-    labels: dict[str, str] = Field(default_factory=dict)
-    fingerprint: str | None = None
-    started_at: datetime
-    ended_at: datetime | None = None
+    labels: dict[Short, Long] = Field(default_factory=dict, max_length=MAX_LABELS)
+    fingerprint: Short | None = None
+    started_at: AwareDatetime
+    ended_at: AwareDatetime | None = None
 
 
 def _label_fingerprint(alertname: str, service: str, labels: dict[str, str]) -> str:
     blob = json.dumps([alertname, service, sorted(labels.items())])
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def _utc(dt: datetime) -> datetime:
+    return dt.astimezone(UTC)
 
 
 def normalize_alertmanager(webhook: AlertmanagerWebhook) -> list[Alert]:
@@ -48,6 +61,8 @@ def normalize_alertmanager(webhook: AlertmanagerWebhook) -> list[Alert]:
     ``alertname`` and ``service`` labels are required. ``severity`` defaults to ``warning``
     when absent but an unrecognised value is an error. Nothing is silently dropped.
     """
+    if len(webhook.alerts) > MAX_ALERTS:
+        raise NormalizationError([f"too many alerts: {len(webhook.alerts)} > {MAX_ALERTS}"])
     alerts: list[Alert] = []
     problems: list[str] = []
     for i, am in enumerate(webhook.alerts):
@@ -56,12 +71,25 @@ def normalize_alertmanager(webhook: AlertmanagerWebhook) -> list[Alert]:
         if missing:
             problems.append(f"{where}: missing required label(s): {', '.join(missing)}")
             continue
-        raw_severity = am.labels.get("severity", Severity.WARNING.value)
+        if len(am.labels) > MAX_LABELS or any(
+            len(k) > 256 or len(v) > MAX_VALUE_LEN for k, v in am.labels.items()
+        ):
+            problems.append(f"{where}: labels exceed size limits")
+            continue
+        if any(len(v) > MAX_VALUE_LEN for v in am.annotations.values()):
+            problems.append(f"{where}: annotations exceed size limits")
+            continue
+        if am.startsAt.tzinfo is None or (am.endsAt is not None and am.endsAt.tzinfo is None):
+            problems.append(f"{where}: timestamps must include a timezone offset")
+            continue
+        raw_severity = am.labels.get("severity", Severity.WARNING.value).lower()
         try:
             severity = Severity(raw_severity)
         except ValueError:
             problems.append(f"{where}: invalid severity label {raw_severity!r}")
             continue
+        ends = am.endsAt
+        ended_at = None if ends is None or ends.year <= _ZERO_YEAR else _utc(ends)
         summary = am.annotations.get("summary") or am.annotations.get("description") or ""
         alerts.append(
             Alert(
@@ -73,8 +101,8 @@ def normalize_alertmanager(webhook: AlertmanagerWebhook) -> list[Alert]:
                 status=am.status,
                 summary=summary,
                 labels=dict(am.labels),
-                started_at=am.startsAt,
-                ended_at=am.endsAt,
+                started_at=_utc(am.startsAt),
+                ended_at=ended_at,
             )
         )
     if problems:
@@ -94,7 +122,7 @@ def normalize_generic(payload: GenericWebhook) -> list[Alert]:
             status=payload.status,
             summary=payload.summary,
             labels=dict(payload.labels),
-            started_at=payload.started_at,
-            ended_at=payload.ended_at,
+            started_at=_utc(payload.started_at),
+            ended_at=_utc(payload.ended_at) if payload.ended_at else None,
         )
     ]

@@ -1,6 +1,7 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
 
 from firebreak.ingest.normalize import (
     GenericWebhook,
@@ -80,3 +81,100 @@ def test_generic_fingerprint_is_stable() -> None:
     assert a1.fingerprint == a2.fingerprint
     assert a1.idempotency_key == a2.idempotency_key
     assert a1.source is AlertSource.GENERIC
+
+
+@pytest.mark.parametrize(
+    "ts", ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00+00:00", "2026-01-01T02:00:00+02:00"]
+)
+def test_timezones_produce_same_key(ts: str) -> None:
+    am = AlertmanagerAlert(
+        status=AlertStatus.FIRING,
+        labels={"alertname": "A", "service": "s"},
+        startsAt=datetime.fromisoformat(ts),
+        fingerprint="f",
+    )
+    g = GenericWebhook(
+        alertname="A", service="s", fingerprint="f", started_at=datetime.fromisoformat(ts)
+    )
+    [a] = normalize_alertmanager(_hook(am))
+    [b] = normalize_generic(g)
+    assert a.started_at.utcoffset() == timedelta(0)
+    assert a.idempotency_key == "alertmanager:f:2026-01-01T00:00:00+00:00"
+    assert b.idempotency_key == "generic:f:2026-01-01T00:00:00+00:00"
+
+
+def test_naive_generic_rejected() -> None:
+    with pytest.raises(ValidationError):
+        GenericWebhook(alertname="A", service="s", started_at=datetime(2026, 1, 1))
+
+
+def test_naive_alertmanager_rejected() -> None:
+    am = AlertmanagerAlert(
+        status=AlertStatus.FIRING,
+        labels={"alertname": "A", "service": "s"},
+        startsAt=datetime(2026, 1, 1),
+        fingerprint="f",
+    )
+    with pytest.raises(NormalizationError, match="timezone"):
+        normalize_alertmanager(_hook(am))
+
+
+def test_zero_ends_at_becomes_none() -> None:
+    am = AlertmanagerAlert(
+        status=AlertStatus.FIRING,
+        labels={"alertname": "A", "service": "s"},
+        startsAt=T0,
+        endsAt=datetime(1, 1, 1, tzinfo=UTC),
+        fingerprint="f",
+    )
+    [a] = normalize_alertmanager(_hook(am))
+    assert a.ended_at is None
+
+
+def test_real_ends_at_kept_in_utc() -> None:
+    am = AlertmanagerAlert(
+        status=AlertStatus.RESOLVED,
+        labels={"alertname": "A", "service": "s"},
+        startsAt=T0,
+        endsAt=datetime.fromisoformat("2026-01-01T03:00:00+02:00"),
+        fingerprint="f",
+    )
+    [a] = normalize_alertmanager(_hook(am))
+    assert a.ended_at == datetime(2026, 1, 1, 1, tzinfo=UTC)
+
+
+def test_severity_lowercased() -> None:
+    [a] = normalize_alertmanager(
+        _hook(_am({"alertname": "A", "service": "s", "severity": "CRITICAL"}))
+    )
+    assert a.severity is Severity.CRITICAL
+
+
+def test_too_many_alerts_rejected() -> None:
+    hook = _hook(*[_am({"alertname": "A", "service": "s"}, fp=str(i)) for i in range(501)])
+    with pytest.raises(NormalizationError, match="too many"):
+        normalize_alertmanager(hook)
+
+
+def test_oversized_label_rejected() -> None:
+    with pytest.raises(NormalizationError, match="size"):
+        normalize_alertmanager(_hook(_am({"alertname": "A", "service": "s", "x": "y" * 2001})))
+
+
+def test_explicit_generic_fingerprint_used() -> None:
+    [a] = normalize_generic(
+        GenericWebhook(alertname="A", service="s", fingerprint="mine", started_at=T0)
+    )
+    assert a.fingerprint == "mine"
+
+
+def test_description_fallback_summary() -> None:
+    am = AlertmanagerAlert(
+        status=AlertStatus.FIRING,
+        labels={"alertname": "A", "service": "s"},
+        annotations={"description": "long text"},
+        startsAt=T0,
+        fingerprint="f",
+    )
+    [a] = normalize_alertmanager(_hook(am))
+    assert a.summary == "long text"

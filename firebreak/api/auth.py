@@ -1,6 +1,7 @@
 """Bearer-token auth for webhooks."""
 
 import secrets
+from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
@@ -11,6 +12,7 @@ from firebreak.config import Settings
 _bearer = HTTPBearer(auto_error=False)
 
 
+@lru_cache
 def get_settings() -> Settings:
     return Settings()
 
