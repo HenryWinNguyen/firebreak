@@ -38,3 +38,4 @@ class AgentRunResult(BaseModel):
     tool_calls: list[ToolCallRecord]
     usage: Usage
     stopped_reason: str = Field(description="final_output | max_steps | budget | error")
+    error: str | None = Field(default=None, description="Why the run ended in error, if it did")

@@ -8,6 +8,7 @@ are a checkpoint.
 | Version | Date | Change |
 |---|---|---|
 | v1 | 2026-10-27 | Initial: models, Shopfloor API/metrics/logs/alerts, webhook, ports |
+| v1.1 | 2026-10-27 | Additive (T-032 requests): `AgentRunResult.error`, `LLMRequest.fallback_model`; `Evidence.raw_ref` ownership rule |
 
 ---
 
@@ -27,6 +28,8 @@ Rules:
 - Ids are prefixed (`al_`, `inc_`, `ev_`, `hy_`, `act_`) and made with `new_id`.
 - All datetimes are timezone-aware UTC.
 - `ProposedAction.risk_tier` is set only by the policy engine.
+- `Evidence.raw_ref`: the tool gateway proposes the key (`evidence/<incident_id>/<evidence_id>`). The `EvidenceSink` may replace it, and the `Evidence` returned by `record` is authoritative.
+- `LLMRequest.fallback_model`: the client uses it, when set, in preference to any constructor-level fallback map.
 - `Finding.evidence_ids` must be non-empty. The runtime also checks they exist with `EvidenceSink.exists`.
 
 ## 2. Shopfloor (target system)
