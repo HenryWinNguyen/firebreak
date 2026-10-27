@@ -13,7 +13,6 @@ from common.errors import call_service
 from common.limits import MAX_QUANTITY
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from orders.app import MAX_QUANTITY
 from pydantic import BaseModel, Field
 
 

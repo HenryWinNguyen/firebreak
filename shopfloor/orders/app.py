@@ -36,7 +36,6 @@ RAW_POOL_MAX = 50  # hard ceiling; orders.db_pool_size is clamped to it
 ORDER_WORK_SECONDS = float(os.environ.get("SHOPFLOOR_ORDER_WORK_SECONDS", "0.02"))
 ITEM_QUERY_SECONDS = float(os.environ.get("SHOPFLOOR_ITEM_QUERY_SECONDS", "0.25"))
 BAD_DEPLOY_ERROR_RATE = 0.1
-MAX_QUANTITY = 20
 
 
 def pool_size_fn(runtime: RuntimeSettings) -> Callable[[], int]:
