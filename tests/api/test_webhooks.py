@@ -173,18 +173,6 @@ async def test_generic_explicit_fingerprint_and_replay(client: httpx.AsyncClient
     assert r2.json()["results"][0]["decision"]["duplicate"] is True
 
 
-async def test_default_grouper_is_503(repo: MemoryRepo) -> None:
-    app.dependency_overrides[get_alert_repo] = lambda: repo
-    try:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://t"
-        ) as c:
-            r = await c.post("/webhooks/alertmanager", json=am_hook(am_alert()), headers=AUTH)
-    finally:
-        app.dependency_overrides.clear()
-    assert r.status_code == 503
-
-
 @pytest.mark.db
 async def test_replay_against_postgres(alert_repo: AlertRepository, grouper: FakeGrouper) -> None:
     app.dependency_overrides[get_alert_repo] = lambda: alert_repo

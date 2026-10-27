@@ -1,17 +1,22 @@
 import asyncio
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
+from alembic.autogenerate import compare_metadata
+from alembic.migration import MigrationContext
 from sqlalchemy import text
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from firebreak.db.repositories import (
     AlertNotFoundError,
     AlertRepository,
+    EvidenceConflictError,
     IncidentNotFoundError,
     IncidentRepository,
     PostgresEvidenceSink,
 )
+from firebreak.db.tables import Base
 from firebreak.models.alert import Alert, AlertSource
 from firebreak.models.common import Severity, utcnow
 from firebreak.models.evidence import Evidence, EvidenceKind, EvidenceSink
@@ -199,3 +204,149 @@ async def test_evidence_sink_record_and_exists(sessions: Sessions) -> None:
     assert await sink.exists(inc.id, []) == set()
     assert await sink.get_raw(ev.raw_ref) == "RAW PAYLOAD"
     assert await sink.get(ev.id) == ev
+
+
+async def test_evidence_conflicting_retry_raises(sessions: Sessions, engine: AsyncEngine) -> None:
+    incidents = IncidentRepository(sessions)
+    inc = await incidents.create(make_incident())
+    other = await incidents.create(make_incident())
+    sink = PostgresEvidenceSink(sessions)
+    ev = make_evidence(inc.id)
+    await sink.record(ev, "RAW")
+
+    with pytest.raises(EvidenceConflictError):
+        await sink.record(ev, "DIFFERENT RAW")
+    with pytest.raises(EvidenceConflictError):
+        await sink.record(ev.model_copy(update={"incident_id": other.id}), "RAW")
+    assert await sink.get_raw(ev.raw_ref) == "RAW"
+    assert await count(engine, "evidence") == 1
+
+
+async def test_attach_unknown_alert_raises_typed_error(
+    sessions: Sessions, engine: AsyncEngine
+) -> None:
+    incidents = IncidentRepository(sessions)
+    inc = await incidents.create(make_incident())
+    with pytest.raises(AlertNotFoundError) as exc:
+        await incidents.attach_alert(inc.id, "al_nope", "orders")
+    assert exc.value.alert_ids == ["al_nope"]
+    assert await count(engine, "incident_alerts") == 0
+
+
+NAIVE = datetime(2026, 1, 1, 12, 0, 0)
+PLUS7 = timezone(timedelta(hours=7))
+
+
+async def test_naive_datetimes_rejected(sessions: Sessions, engine: AsyncEngine) -> None:
+    alerts = AlertRepository(sessions)
+    incidents = IncidentRepository(sessions)
+    with pytest.raises(ValueError):
+        await incidents.find_open_for_cluster("checkout", NAIVE)
+    with pytest.raises(ValueError):
+        await alerts.mark_resolved("k", NAIVE)
+    with pytest.raises(ValueError):
+        await alerts.insert_if_new(make_alert(started_at=NAIVE))
+    with pytest.raises(ValueError):
+        await incidents.create(make_incident(window_closes_at=NAIVE))
+    inc = await incidents.create(make_incident())
+    async with sessions() as session, session.begin():
+        with pytest.raises(ValueError):
+            await incidents.update_rollup_in(
+                session,
+                inc.id,
+                severity=Severity.WARNING,
+                window_closes_at=NAIVE,
+                services=["orders"],
+            )
+    assert await count(engine, "alerts") == 0
+
+
+async def test_window_boundary_with_non_utc_offset(sessions: Sessions) -> None:
+    incidents = IncidentRepository(sessions)
+    closes = utcnow().astimezone(PLUS7)
+    inc = await incidents.create(
+        make_incident(opened_at=closes - timedelta(seconds=60), window_closes_at=closes)
+    )
+    # Same instant expressed in UTC is still "closed"; one microsecond earlier is open.
+    assert await incidents.find_open_for_cluster("checkout", closes.astimezone(UTC)) is None
+    before = await incidents.find_open_for_cluster("checkout", closes - timedelta(microseconds=1))
+    assert before is not None and before.id == inc.id
+
+
+async def test_insert_if_new_in_returns_stored_id(sessions: Sessions) -> None:
+    a = make_alert()
+    dup = make_alert(started_at=a.started_at)
+    async with sessions() as session, session.begin():
+        assert await AlertRepository.insert_if_new_in(session, a) == a.id
+        assert await AlertRepository.insert_if_new_in(session, dup) == a.id
+
+
+async def test_grouper_style_transaction_and_rollback(
+    sessions: Sessions, engine: AsyncEngine
+) -> None:
+    a1, a2 = make_alert("f1", "orders"), make_alert("f2", "inventory")
+    now = utcnow()
+    async with sessions() as session, session.begin():
+        await AlertRepository.insert_if_new_in(session, a1)
+        inc = await IncidentRepository.create_in(
+            session, make_incident(alert_ids=[a1.id], severity=Severity.WARNING)
+        )
+    async with sessions() as session, session.begin():
+        await AlertRepository.insert_if_new_in(session, a2)
+        found = await IncidentRepository.find_open_for_cluster_in(
+            session, "checkout", now, for_update=True
+        )
+        assert found is not None and found.id == inc.id
+        await IncidentRepository.attach_alert_in(session, inc.id, a2.id, "inventory")
+        await IncidentRepository.update_rollup_in(
+            session,
+            inc.id,
+            severity=Severity.CRITICAL,
+            window_closes_at=now,
+            services=[*found.services, "inventory", "inventory"],
+        )
+    got = await IncidentRepository(sessions).get(inc.id)
+    assert got is not None
+    assert got.severity == Severity.CRITICAL
+    assert got.window_closes_at == now
+    assert got.services == ["orders", "inventory"]
+    assert got.alert_ids == [a1.id, a2.id]
+
+    # An exception in the caller's transaction rolls back every _in call.
+    a3 = make_alert("f3", "orders")
+    with pytest.raises(AlertNotFoundError):
+        async with sessions() as session, session.begin():
+            await AlertRepository.insert_if_new_in(session, a3)
+            await IncidentRepository.attach_alert_in(session, inc.id, "al_nope", "orders")
+    assert await count(engine, "alerts") == 2
+
+    with pytest.raises(IncidentNotFoundError):
+        async with sessions() as session, session.begin():
+            await IncidentRepository.update_rollup_in(
+                session, "inc_x", severity=Severity.INFO, window_closes_at=now, services=[]
+            )
+
+
+async def test_mark_resolved(sessions: Sessions, engine: AsyncEngine) -> None:
+    repo = AlertRepository(sessions)
+    a = make_alert()
+    assert await repo.mark_resolved(a.idempotency_key, utcnow()) is False
+    await repo.insert_if_new(a)
+    ended = utcnow().replace(microsecond=0)
+    assert await repo.mark_resolved(a.idempotency_key, ended) is True
+    assert await repo.mark_resolved(a.idempotency_key, ended + timedelta(seconds=5)) is True
+    async with engine.connect() as conn:
+        row = (await conn.execute(text("SELECT status, ended_at FROM alerts"))).one()
+    assert row.status == "resolved"
+    assert row.ended_at == ended  # idempotent: first ended_at kept
+    async with sessions() as session, session.begin():
+        assert await AlertRepository.mark_resolved_in(session, "nope", ended) is False
+
+
+async def test_no_schema_drift(engine: AsyncEngine) -> None:
+    def _diff(sync_conn: Connection) -> list[object]:
+        ctx = MigrationContext.configure(sync_conn)
+        return list(compare_metadata(ctx, Base.metadata))
+
+    async with engine.connect() as conn:
+        assert await conn.run_sync(_diff) == []
