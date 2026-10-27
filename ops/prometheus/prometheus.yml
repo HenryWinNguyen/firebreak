@@ -1,0 +1,26 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+# Shopfloor services (CONTRACTS 2.1). Targets stay down until they are up.
+scrape_configs:
+  - job_name: gateway
+    static_configs:
+      - targets: ["gateway:8100"]
+        labels: { service: gateway }
+  - job_name: orders
+    static_configs:
+      - targets: ["orders:8101"]
+        labels: { service: orders }
+  - job_name: inventory
+    static_configs:
+      - targets: ["inventory:8102"]
+        labels: { service: inventory }
