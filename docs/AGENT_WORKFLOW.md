@@ -66,6 +66,10 @@ caffeinate -i claude --name lead        # caffeinate keeps the Mac awake for lon
   --name core` in a second terminal still works. It talks to `@lead` the
   same way.
 
+**Docker isolation:** only one builder at a time owns the compose stack and its fixed ports.
+Others that need Postgres run their own container on a spare port (e.g. `55432`) and pass
+`FIREBREAK_TEST_DATABASE_URL`.
+
 Agent **teams** stay off for building. They're turned on only for the
 debate and red-team sessions in §8.
 
@@ -149,8 +153,8 @@ A PR merges on its own when **all** of these pass:
 | G1 CI | ruff + mypy --strict + pytest (+ replay evals once M4 exists) green |
 | G2 Ownership | `scripts/check_owned_paths.py <task>`: the diff touches only `owned_paths` |
 | G3 Spec | Every definition-of-done box is checked, and the verify command passes in the lead's own run |
-| G4 Review | `reviewer` subagent reports **zero blocking** items (it explicitly looks for silent failures, swallowed exceptions, duplication, contract drift) |
-| G5 Log | PR adds a PROGRESS.md entry |
+| G4 Review | The lead runs the `reviewer` check on the PR (builders can't spawn their own subagents) and it reports **zero blocking** items (it explicitly looks for silent failures, swallowed exceptions, duplication, contract drift) |
+| G5 Log | PR description has a `## Progress entry`. The lead copies it into PROGRESS.md (builders never edit PROGRESS.md, to avoid merge conflicts between parallel PRs) |
 | G6 Risk | `risk: high` → a second review with Opus and `/code-review`, zero blocking |
 
 If a gate fails, the lead sends the findings back to the same named

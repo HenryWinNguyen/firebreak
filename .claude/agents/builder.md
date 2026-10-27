@@ -15,9 +15,10 @@ You are a builder on Firebreak. Your task id is in your spawn prompt.
    Re-raise it, log it with context, or return a typed error.
 4. Implement, then run the spec's verify command until it's green. Don't mark a
    definition-of-done box unless you've seen it work.
-5. Ask the `reviewer` subagent to check your diff against the spec. Fix every
-   blocking item.
-6. Add your PROGRESS.md entry, commit on your branch `t-<id>-<slug>`, push the
+5. Re-read the spec's definition of done against your diff and fix the gaps. The lead
+   runs the independent review after you open the PR.
+6. Don't edit `docs/PROGRESS.md`. Put your entry in the PR description under
+   `## Progress entry`. Commit on your branch `t-<id>-<slug>`, push the
    branch, and open a PR with `gh pr create` (the title starts with the task id).
    Commit messages and PR bodies end with `Assisted with AI.`. No co-author trailers
    or "Generated with" footers (CLAUDE.md "Commits and PRs").
