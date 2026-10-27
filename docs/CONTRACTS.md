@@ -8,6 +8,7 @@ are a checkpoint.
 | Version | Date | Change |
 |---|---|---|
 | v1 | 2026-10-27 | Initial: models, Shopfloor API/metrics/logs/alerts, webhook, ports |
+| v1.2 | 2026-10-27 | `GroupingDecision.incident_id` is `str \| None` (T-021 request); resolved-alert write path (T-025/T-027) |
 | v1.1 | 2026-10-27 | Additive (T-032 requests): `AgentRunResult.error`, `LLMRequest.fallback_model`; `Evidence.raw_ref` ownership rule |
 
 ---

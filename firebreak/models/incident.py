@@ -54,7 +54,9 @@ class Incident(BaseModel):
 
 
 class GroupingDecision(BaseModel):
-    incident_id: str
+    incident_id: str | None = Field(
+        description="None when the alert was not grouped (e.g. resolved, or rejected)"
+    )
     created: bool = Field(description="True if this alert opened a new incident")
     duplicate: bool = Field(description="True if the alert was already ingested (no-op)")
 
