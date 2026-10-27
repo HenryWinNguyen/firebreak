@@ -41,6 +41,7 @@ class ServiceGraph:
                     f"edge {caller}->{callee} crosses clusters "
                     f"{self._service_to_cluster[caller]!r} and {self._service_to_cluster[callee]!r}"
                 )
+        self._warned: set[str] = set()
         self.clusters = {k: list(v) for k, v in clusters.items()}
         self.edges = list(edges)
 
@@ -75,6 +76,8 @@ class ServiceGraph:
     def cluster_of(self, service: str) -> str:
         cluster = self._service_to_cluster.get(service)
         if cluster is None:
-            logger.warning("unknown service %r; using its own singleton cluster", service)
+            if service not in self._warned:  # warn once per service, not per alert
+                self._warned.add(service)
+                logger.warning("unknown service %r; using its own singleton cluster", service)
             return f"singleton:{service}"
         return cluster

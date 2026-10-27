@@ -3,22 +3,21 @@
 An alert joins the open incident of its dependency cluster if that incident's
 window has not closed; otherwise it opens a new incident. The whole decision
 runs in one transaction behind a per-cluster ``pg_advisory_xact_lock`` so two
-alerts arriving together for one cluster produce a single incident.
+alerts arriving together for one cluster produce a single incident. All reads and
+writes go through the session-taking ``*_in`` repository methods.
 """
 
 import logging
 from datetime import timedelta
 
-from sqlalchemy import select, text, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, text
 
-from firebreak.db.repositories import SessionFactory
-from firebreak.db.tables import AlertRow, IncidentAlertRow, IncidentRow
+from firebreak.db.repositories import AlertRepository, IncidentRepository, SessionFactory
+from firebreak.db.tables import IncidentAlertRow
 from firebreak.ingest.service_graph import ServiceGraph
-from firebreak.models.alert import Alert
-from firebreak.models.common import Severity, new_id, utcnow
-from firebreak.models.incident import TERMINAL_STATES, GroupingDecision, IncidentState
+from firebreak.models.alert import Alert, AlertStatus
+from firebreak.models.common import Severity, utcnow
+from firebreak.models.incident import GroupingDecision, Incident, IncidentState
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +41,7 @@ class PostgresIncidentGrouper:
 
     async def assign(self, alert: Alert) -> GroupingDecision:
         cluster = self._graph.cluster_of(alert.service)
+        resolved = alert.status is AlertStatus.RESOLVED
         async with self._sessions() as session, session.begin():
             # Serialise all grouping decisions for this cluster until commit.
             await session.execute(
@@ -50,8 +50,9 @@ class PostgresIncidentGrouper:
             # Take "now" after the lock so a waiter sees the winner's window.
             now = utcnow()
 
-            alert_id = await self._ensure_alert(session, alert)
+            alert_id = await AlertRepository.insert_if_new_in(session, alert)
 
+            # The one query kept here: no repository method answers "is this alert linked".
             existing = (
                 await session.execute(
                     select(IncidentAlertRow.incident_id).where(
@@ -62,61 +63,54 @@ class PostgresIncidentGrouper:
             if existing is not None:
                 return GroupingDecision(incident_id=existing, created=False, duplicate=True)
 
-            open_inc = (
-                await session.execute(
-                    select(IncidentRow)
-                    .where(
-                        IncidentRow.cluster == cluster,
-                        IncidentRow.window_closes_at > now,
-                        IncidentRow.state.not_in([s.value for s in TERMINAL_STATES]),
-                    )
-                    .order_by(IncidentRow.opened_at.desc(), IncidentRow.id.desc())
-                    .limit(1)
-                    .with_for_update()
-                )
-            ).scalar_one_or_none()
+            open_inc = await IncidentRepository.find_open_for_cluster_in(
+                session, cluster, now, for_update=True
+            )
 
-            critical = alert.severity is Severity.CRITICAL
             if open_inc is None:
-                incident_id = new_id("inc")
-                session.add(
-                    IncidentRow(
-                        id=incident_id,
-                        state=IncidentState.GROUPING.value,
-                        severity=alert.severity.value,
+                if resolved:
+                    # A resolved alert never opens an incident; it stays stored, unlinked.
+                    logger.info("resolved alert %s: no open incident in %s", alert_id, cluster)
+                    return GroupingDecision(
+                        incident_id=None, created=False, duplicate=alert_id != alert.id
+                    )
+                critical = alert.severity is Severity.CRITICAL
+                incident = await IncidentRepository.create_in(
+                    session,
+                    Incident(
+                        state=IncidentState.GROUPING,
+                        severity=alert.severity,
                         cluster=cluster,
                         services=[alert.service],
+                        alert_ids=[alert_id],
                         opened_at=now,
                         window_closes_at=now if critical else now + self._window,
                         updated_at=now,
-                    )
+                    ),
                 )
-                await session.flush()
-                created = True
+                incident_id, created = incident.id, True
             else:
-                incident_id = open_inc.id
-                severity = max(
-                    Severity(open_inc.severity), alert.severity, key=_SEVERITY_RANK.__getitem__
+                incident_id, created = open_inc.id, False
+                # attach_alert_in links the alert and appends the service atomically.
+                await IncidentRepository.attach_alert_in(
+                    session, incident_id, alert_id, alert.service
                 )
-                services = list(open_inc.services)
-                if alert.service not in services:
-                    services.append(alert.service)
-                values: dict[str, object] = {
-                    "severity": severity.value,
-                    "services": services,
-                    "updated_at": now,
-                }
-                if critical:
-                    # Investigate right away: close the window now.
-                    values["window_closes_at"] = min(open_inc.window_closes_at, now)
-                await session.execute(
-                    update(IncidentRow).where(IncidentRow.id == incident_id).values(**values)
-                )
-                created = False
-
-            session.add(
-                IncidentAlertRow(incident_id=incident_id, alert_id=alert_id, service=alert.service)
-            )
+                if not resolved:
+                    # The row is locked FOR UPDATE since the read above, so its services plus
+                    # the new one is the complete list: no concurrent attach can be lost.
+                    window = open_inc.window_closes_at
+                    if alert.severity is Severity.CRITICAL:
+                        # Investigate right away: close the window now.
+                        window = min(window, now)
+                    await IncidentRepository.update_rollup_in(
+                        session,
+                        incident_id,
+                        severity=max(
+                            open_inc.severity, alert.severity, key=_SEVERITY_RANK.__getitem__
+                        ),
+                        window_closes_at=window,
+                        services=[*open_inc.services, alert.service],
+                    )
             logger.info(
                 "alert %s -> incident %s (cluster=%s created=%s)",
                 alert_id,
@@ -125,31 +119,3 @@ class PostgresIncidentGrouper:
                 created,
             )
             return GroupingDecision(incident_id=incident_id, created=created, duplicate=False)
-
-    @staticmethod
-    async def _ensure_alert(session: AsyncSession, alert: Alert) -> str:
-        """Insert the alert if new; return the stored alert's id either way."""
-        await session.execute(
-            pg_insert(AlertRow)
-            .values(
-                id=alert.id,
-                idempotency_key=alert.idempotency_key,
-                source=alert.source.value,
-                fingerprint=alert.fingerprint,
-                alertname=alert.alertname,
-                service=alert.service,
-                severity=alert.severity.value,
-                status=alert.status.value,
-                summary=alert.summary,
-                labels=alert.labels,
-                started_at=alert.started_at,
-                ended_at=alert.ended_at,
-            )
-            .on_conflict_do_nothing(index_elements=[AlertRow.idempotency_key])
-        )
-        stored: str = (
-            await session.execute(
-                select(AlertRow.id).where(AlertRow.idempotency_key == alert.idempotency_key)
-            )
-        ).scalar_one()
-        return stored

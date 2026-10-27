@@ -43,3 +43,13 @@ def test_missing_and_malformed_file(tmp_path: Path) -> None:
     bad.write_text("clusters: [unclosed")
     with pytest.raises(ServiceGraphError):
         ServiceGraph.load(bad)
+
+
+def test_unknown_service_warns_once_per_service(caplog: pytest.LogCaptureFixture) -> None:
+    g = ServiceGraph.load()
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            g.cluster_of("mystery")
+        g.cluster_of("other")
+    assert caplog.text.count("mystery") == 1
+    assert caplog.text.count("other") == 1
