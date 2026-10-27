@@ -42,7 +42,8 @@ class LLMRequest(BaseModel):
     tools: list[ToolSpec] = Field(default_factory=list)
     max_tokens: int = Field(default=4096, gt=0)
     fallback_model: str | None = Field(
-        default=None, description="Used by the client after retries are exhausted (from AgentConfig)"
+        default=None,
+        description="Used by the client after retries are exhausted (from AgentConfig)",
     )
 
 
