@@ -9,25 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from firebreak.api.auth import get_settings
 from firebreak.config import Settings
 from firebreak.db.engine import make_engine, make_session_factory
-from firebreak.db.repositories import AlertRepository, SessionFactory
+from firebreak.db.repositories import AlertRepository
 from firebreak.ingest.grouping import PostgresIncidentGrouper
 from firebreak.ingest.service_graph import ServiceGraph
-from firebreak.models.alert import Alert
 from firebreak.models.incident import IncidentGrouper
-
-
-class IngestAlertRepository(AlertRepository):
-    """``AlertRepository`` plus the stored-id lookup the ingest pipeline needs."""
-
-    def __init__(self, sessions: SessionFactory) -> None:
-        super().__init__(sessions)
-
-    async def insert_or_get(self, alert: Alert) -> tuple[str, bool]:
-        """Insert if the key is new. Return ``(stored_id, inserted)``."""
-        async with self._sessions() as session, session.begin():
-            stored_id = await self.insert_if_new_in(session, alert)
-        return stored_id, stored_id == alert.id
-
 
 _engines: list[AsyncEngine] = []
 
@@ -52,8 +37,8 @@ async def dispose_engines() -> None:
 
 
 @lru_cache
-def _build_alert_repo(database_url: str) -> IngestAlertRepository:
-    return IngestAlertRepository(make_session_factory(get_engine(database_url)))
+def _build_alert_repo(database_url: str) -> AlertRepository:
+    return AlertRepository(make_session_factory(get_engine(database_url)))
 
 
 @lru_cache
@@ -65,7 +50,7 @@ def _build_grouper(database_url: str) -> PostgresIncidentGrouper:
 
 def get_alert_repo(
     settings: Annotated[Settings, Depends(get_settings)],
-) -> IngestAlertRepository:
+) -> AlertRepository:
     return _build_alert_repo(settings.database_url)
 
 

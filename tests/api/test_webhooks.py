@@ -10,7 +10,8 @@ from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from firebreak.api.app import app
-from firebreak.api.deps import IngestAlertRepository, get_alert_repo, get_engine, get_grouper
+from firebreak.api.deps import get_alert_repo, get_engine, get_grouper
+from firebreak.db.repositories import AlertRepository
 from firebreak.ingest.grouping import PostgresIncidentGrouper
 from firebreak.ingest.service_graph import ServiceGraph
 from firebreak.models.alert import Alert
@@ -299,9 +300,7 @@ async def _stored(sessions: async_sessionmaker[AsyncSession]) -> list[tuple[str,
 
 
 @pytest.mark.db
-async def test_replay_against_postgres(
-    alert_repo: IngestAlertRepository, grouper: FakeGrouper
-) -> None:
+async def test_replay_against_postgres(alert_repo: AlertRepository, grouper: FakeGrouper) -> None:
     app.dependency_overrides[get_alert_repo] = lambda: alert_repo
     body = am_hook(am_alert("pg1"))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
@@ -315,7 +314,7 @@ async def test_replay_against_postgres(
 
 @pytest.mark.db
 async def test_resolved_updates_stored_alert_in_postgres(
-    alert_repo: IngestAlertRepository,
+    alert_repo: AlertRepository,
     sessions: async_sessionmaker[AsyncSession],
     grouper: FakeGrouper,
 ) -> None:
@@ -337,7 +336,7 @@ async def test_resolved_updates_stored_alert_in_postgres(
 
 @pytest.mark.db
 async def test_replay_through_real_grouper(
-    alert_repo: IngestAlertRepository, sessions: async_sessionmaker[AsyncSession]
+    alert_repo: AlertRepository, sessions: async_sessionmaker[AsyncSession]
 ) -> None:
     grouper = PostgresIncidentGrouper(sessions, ServiceGraph.load())
     app.dependency_overrides[get_alert_repo] = lambda: alert_repo
