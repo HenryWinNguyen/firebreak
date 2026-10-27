@@ -14,10 +14,6 @@ from firebreak.ingest.grouping import PostgresIncidentGrouper
 from firebreak.ingest.service_graph import ServiceGraph
 from firebreak.models.incident import IncidentGrouper
 
-# Kept for importers that still use the old name; the method now lives on AlertRepository.
-IngestAlertRepository = AlertRepository
-
-
 _engines: list[AsyncEngine] = []
 
 
