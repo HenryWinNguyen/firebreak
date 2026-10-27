@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import os
 import time
+import traceback
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
@@ -44,10 +46,21 @@ def create_base_app(
     runtime: RuntimeSettings | None = None,
     lifespan: Any = None,
     version: str | None = None,
+    on_deploy: Callable[[str, str], None] | None = None,
 ) -> FastAPI:
     version = version or os.environ.get("SHOPFLOOR_VERSION", "1.0.0")
     app = FastAPI(title=f"shopfloor-{service}", lifespan=lifespan)
     app.state.service = service
+    app.state.version = version
+    app.state.on_deploy = on_deploy  # called with (new_version, previous_version)
+    app.state.deploys = [
+        {
+            "service": service,
+            "version": version,
+            "deployed_at": datetime.now(UTC).isoformat(),
+            "message": "initial deploy",
+        }
+    ]
     app.state.metrics = Metrics(service, version)
     app.state.runtime = runtime or RuntimeSettings({})
     app.state.logger = get_logger(service)
@@ -69,7 +82,9 @@ def create_base_app(
             try:
                 response = await call_next(request)
             except Exception as exc:  # noqa: BLE001 (recorded and logged below as a 500)
-                request.state.error = f"{type(exc).__name__}: {exc}"
+                request.state.error = "".join(
+                    traceback.format_exception(type(exc), exc, exc.__traceback__)
+                ).strip()
                 response = JSONResponse({"detail": "internal error"}, status_code=500)
             elapsed = time.perf_counter() - start
             route = getattr(request.scope.get("route"), "path", "unmatched")
