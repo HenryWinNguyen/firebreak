@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from firebreak.ingest.pipeline import ingest
+from firebreak.ingest.pipeline import ResolveMissingError, ingest
 from firebreak.models.alert import Alert, AlertSource, AlertStatus
 from firebreak.models.common import Severity
 from firebreak.models.incident import GroupingDecision
@@ -27,12 +27,19 @@ class FakeRepo:
     def __init__(self) -> None:
         self.keys: set[str] = set()
         self.inserted_before_assign: list[bool] = []
+        self.ids: dict[str, str] = {}
+        self.resolved: list[tuple[str, datetime]] = []
 
-    async def insert_if_new(self, alert: Alert) -> bool:
+    async def insert_or_get(self, alert: Alert) -> tuple[str, bool]:
         if alert.idempotency_key in self.keys:
-            return False
+            return self.ids[alert.idempotency_key], False
         self.keys.add(alert.idempotency_key)
-        return True
+        self.ids[alert.idempotency_key] = alert.id
+        return alert.id, True
+
+    async def mark_resolved(self, idempotency_key: str, ended_at: datetime) -> bool:
+        self.resolved.append((idempotency_key, ended_at))
+        return idempotency_key in self.keys
 
 
 class FakeGrouper:
@@ -43,10 +50,6 @@ class FakeGrouper:
         self.fail_times = fail_times
         self.calls: list[Alert] = []
         self.linked: set[str] = set()
-
-    @property
-    def seen(self) -> list[Alert]:
-        return self.calls
 
     async def assign(self, alert: Alert) -> GroupingDecision:
         self.repo.inserted_before_assign.append(alert.idempotency_key in self.repo.keys)
@@ -64,7 +67,9 @@ class FakeGrouper:
 async def test_new_alerts_go_to_grouper_after_insert() -> None:
     repo = FakeRepo()
     grouper = FakeGrouper(repo)
-    decisions = await ingest([make_alert("a"), make_alert("b")], repo, grouper)
+    decisions = [
+        r.decision for r in await ingest([make_alert("a"), make_alert("b")], repo, grouper)
+    ]
     assert [d.incident_id for d in decisions] == ["inc_1", "inc_1"]
     assert [d.created for d in decisions] == [True, False]
     assert repo.inserted_before_assign == [True, True]
@@ -74,21 +79,55 @@ async def test_replay_reports_duplicate_via_grouper() -> None:
     repo = FakeRepo()
     grouper = FakeGrouper(repo)
     await ingest([make_alert("a")], repo, grouper)
-    decisions = await ingest([make_alert("a"), make_alert("b")], repo, grouper)
+    results = await ingest([make_alert("a"), make_alert("b")], repo, grouper)
+    decisions = [r.decision for r in results]
     assert [d.duplicate for d in decisions] == [True, False]
     assert decisions[0].incident_id == "inc_1"
 
 
-async def test_resolved_alert_stored_but_not_grouped() -> None:
+async def test_replay_reports_stored_alert_id() -> None:
     repo = FakeRepo()
     grouper = FakeGrouper(repo)
-    [d] = await ingest([make_alert("a", AlertStatus.RESOLVED)], repo, grouper)
+    [first] = await ingest([make_alert("a")], repo, grouper)
+    [again] = await ingest([make_alert("a")], repo, grouper)
+    assert again.alert_id == first.alert_id
+
+
+async def test_new_resolved_alert_stored_but_not_grouped_or_updated() -> None:
+    repo = FakeRepo()
+    grouper = FakeGrouper(repo)
+    [r] = await ingest([make_alert("a", AlertStatus.RESOLVED)], repo, grouper)
+    d = r.decision
     assert d.incident_id is None and not d.duplicate and not d.created
-    assert grouper.calls == []
-    assert len(repo.keys) == 1
-    [d2] = await ingest([make_alert("a", AlertStatus.RESOLVED)], repo, grouper)
-    assert d2.incident_id is None and d2.duplicate
-    assert grouper.calls == []
+    assert grouper.calls == [] and len(repo.keys) == 1 and repo.resolved == []
+
+
+async def test_resolved_for_stored_firing_alert_calls_mark_resolved() -> None:
+    repo = FakeRepo()
+    grouper = FakeGrouper(repo)
+    [fired] = await ingest([make_alert("a")], repo, grouper)
+    resolved = make_alert("a", AlertStatus.RESOLVED)
+    [r] = await ingest([resolved], repo, grouper)
+    assert repo.resolved == [(resolved.idempotency_key, repo.resolved[0][1])]
+    assert repo.resolved[0][1].utcoffset() is not None
+    assert r.alert_id == fired.alert_id
+    assert r.decision.incident_id is None and not r.decision.duplicate
+    assert len(grouper.calls) == 1  # only the firing one
+
+
+async def test_resolved_update_vanished_row_raises() -> None:
+    repo = FakeRepo()
+    repo.ids["x"] = "alr_x"
+
+    class Lost(FakeRepo):
+        async def insert_or_get(self, alert: Alert) -> tuple[str, bool]:
+            return "alr_x", False
+
+        async def mark_resolved(self, idempotency_key: str, ended_at: datetime) -> bool:
+            return False
+
+    with pytest.raises(ResolveMissingError):
+        await ingest([make_alert("a", AlertStatus.RESOLVED)], Lost(), FakeGrouper(repo))
 
 
 async def test_grouper_error_propagates() -> None:
@@ -103,6 +142,7 @@ async def test_replay_after_grouper_failure_groups_the_alert() -> None:
     with pytest.raises(RuntimeError):
         await ingest([make_alert("a")], repo, grouper)
     assert len(repo.keys) == 1 and grouper.linked == set()  # inserted, never grouped
-    [d] = await ingest([make_alert("a")], repo, grouper)
+    [res] = await ingest([make_alert("a")], repo, grouper)
+    d = res.decision
     assert d.incident_id == "inc_1" and not d.duplicate
     assert len(grouper.linked) == 1

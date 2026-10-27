@@ -18,9 +18,10 @@ from firebreak.models.common import Severity
 MAX_ALERTS = 500
 MAX_LABELS = 64
 MAX_VALUE_LEN = 2000
+MAX_SHORT_LEN = 256
 _ZERO_YEAR = 1  # Alertmanager sends 0001-01-01T00:00:00Z for "no end"
 
-Short = Annotated[str, StringConstraints(min_length=1, max_length=256)]
+Short = Annotated[str, StringConstraints(min_length=1, max_length=MAX_SHORT_LEN)]
 Long = Annotated[str, StringConstraints(max_length=MAX_VALUE_LEN)]
 
 
@@ -66,13 +67,19 @@ def normalize_alertmanager(webhook: AlertmanagerWebhook) -> list[Alert]:
     alerts: list[Alert] = []
     problems: list[str] = []
     for i, am in enumerate(webhook.alerts):
-        where = f"alerts[{i}] (fingerprint={am.fingerprint})"
+        where = f"alerts[{i}] (fingerprint={am.fingerprint[:64]!r})"
+        if not am.fingerprint or len(am.fingerprint) > MAX_SHORT_LEN:
+            problems.append(f"{where}: fingerprint must be 1-{MAX_SHORT_LEN} characters")
+            continue
         missing = [k for k in ("alertname", "service") if not am.labels.get(k)]
         if missing:
             problems.append(f"{where}: missing required label(s): {', '.join(missing)}")
             continue
+        if any(len(am.labels[k]) > MAX_SHORT_LEN for k in ("alertname", "service")):
+            problems.append(f"alerts[{i}]: alertname/service exceed {MAX_SHORT_LEN} characters")
+            continue
         if len(am.labels) > MAX_LABELS or any(
-            len(k) > 256 or len(v) > MAX_VALUE_LEN for k, v in am.labels.items()
+            len(k) > MAX_SHORT_LEN or len(v) > MAX_VALUE_LEN for k, v in am.labels.items()
         ):
             problems.append(f"{where}: labels exceed size limits")
             continue

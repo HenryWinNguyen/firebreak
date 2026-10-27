@@ -44,6 +44,9 @@ Rules:
 
 Business endpoints: `GET /api/products` and `POST /api/orders` on the gateway.
 The gateway calls `POST /orders` on orders, which calls `POST /reserve` on inventory.
+If the order insert fails or the request is cancelled after a reservation, orders calls
+`POST /release` on inventory with the same `{product_id, quantity}` (compensating release).
+`quantity` is 1–20 on every order and reserve endpoint; above 20 → 422.
 
 ### 2.2 Endpoints every service exposes
 | Method | Path | Purpose |
