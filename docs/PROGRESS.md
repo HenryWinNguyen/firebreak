@@ -5,17 +5,21 @@ milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 
 ## Current status
 
-**M0 complete. ⏸ Waiting on Henry at CP0** (see block below).
+**M1/M2/runtime wave in progress.** CP0 passed 2026-10-27. Board: `docs/tasks/BOARD.md`.
 Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
-## ⏸ Waiting on Henry: CP0
-
-Review before anything runs in parallel:
-1. `docs/CONTRACTS.md` + `firebreak/models/`: are the seams right?
-2. `docs/tasks/` (T-011…T-032) + `BOARD.md`: is the split and the first wave right?
-3. Say "go" and the lead spawns the first wave: **T-011, T-022, T-032**.
-
 ## Log
+
+### 2026-10-27: First wave merges (T-022, T-011)
+- **T-022** (#4): persistence layer. Tables, `0001` migration, Alert/Incident repositories,
+  `PostgresEvidenceSink`, with real-Postgres tests (duplicate, 10-way concurrent duplicate,
+  window boundary). Review: 0 blocking, 6 minor → **T-025**.
+- **T-011** (#5): Shopfloor gateway/orders/inventory with the CONTRACTS §2 metrics, JSON logs,
+  trace propagation, Redis cache, runtime-sized DB pool. Review: 0 blocking, 6 minor → folded into **T-012**.
+- Process fixes: builders don't touch PROGRESS.md (the lead copies entries from the PR body), the lead
+  runs reviews, separate Postgres ports per builder, a `shopfloor` CI job, and `main` protection now
+  **enforced for admins** with `check` + `shopfloor` + `owned-paths` required. #5 had merged right
+  after a branch update, before its new checks started. `main` CI was green afterwards, but the bypass is closed now.
 
 ### 2026-10-27: M0 skeleton + contracts v1
 - uv project (Python 3.12), flat `firebreak/` package layout, ruff + mypy --strict + pytest.
