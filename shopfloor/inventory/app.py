@@ -10,7 +10,7 @@ from common.app import create_base_app
 from common.db import create_raw_pool
 from common.pool import BoundedPool
 from common.runtime import RuntimeSettings
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 SCHEMA = """
@@ -71,6 +71,18 @@ class InventoryStore:
                 raise KeyError(product_id)
             return None
 
+    async def release(self, product_id: int, quantity: int) -> int:
+        """Return previously reserved stock (compensation). KeyError if unknown."""
+        async with self.pool.acquire() as conn:
+            remaining = await conn.fetchval(
+                "UPDATE products SET stock = stock + $2 WHERE id = $1 RETURNING stock",
+                product_id,
+                quantity,
+            )
+        if remaining is None:
+            raise KeyError(product_id)
+        return int(remaining)
+
 
 def create_app(store: InventoryStore | None = None) -> FastAPI:
     runtime = RuntimeSettings({"inventory.unavailable": False})
@@ -93,11 +105,16 @@ def create_app(store: InventoryStore | None = None) -> FastAPI:
 
     app = create_base_app("inventory", runtime, lifespan)
 
-    @app.get("/products")
+    async def check_available() -> None:
+        # S4: business routes fail; healthz, metrics and admin stay up so the flag can be undone.
+        if runtime.get("inventory.unavailable"):
+            raise HTTPException(503, "inventory unavailable")
+
+    @app.get("/products", dependencies=[Depends(check_available)])
     async def products() -> list[dict[str, Any]]:
         return await app.state.store.list_products()
 
-    @app.post("/reserve")
+    @app.post("/reserve", dependencies=[Depends(check_available)])
     async def reserve(req: ReserveRequest) -> dict[str, int]:
         try:
             remaining = await app.state.store.reserve(req.product_id, req.quantity)
@@ -106,6 +123,14 @@ def create_app(store: InventoryStore | None = None) -> FastAPI:
         if remaining is None:
             raise HTTPException(409, "insufficient stock")
         return {"product_id": req.product_id, "reserved": req.quantity, "remaining": remaining}
+
+    @app.post("/release", dependencies=[Depends(check_available)])
+    async def release(req: ReserveRequest) -> dict[str, int]:
+        try:
+            remaining = await app.state.store.release(req.product_id, req.quantity)
+        except KeyError:
+            raise HTTPException(404, f"unknown product {req.product_id}") from None
+        return {"product_id": req.product_id, "released": req.quantity, "remaining": remaining}
 
     return app
 
