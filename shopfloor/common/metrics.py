@@ -30,10 +30,18 @@ class Metrics:
         self.pool_size = Gauge("db_pool_size", "DB pool size", ["service"], registry=self.registry)
         self.pool_in_use.labels(service).set(0)
         self.pool_size.labels(service).set(0)
-        info = Gauge(
+        self._info = Gauge(
             "app_info", "Service build info", ["service", "version"], registry=self.registry
         )
-        info.labels(service, version).set(1)
+        self._version = version
+        self._info.labels(service, version).set(1)
+
+    def set_version(self, version: str) -> None:
+        """Point app_info at a new version (a deploy), dropping the old series."""
+        if version != self._version:
+            self._info.remove(self.service, self._version)
+            self._version = version
+        self._info.labels(self.service, version).set(1)
 
     def bind_pool(self, pool: BoundedPool) -> None:
         self.pool_in_use.labels(self.service).set_function(lambda: pool.in_use)
