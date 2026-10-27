@@ -11,12 +11,12 @@
 | T-022 | Persistence layer | core | sonnet | — | merged | #4 |
 | T-025 | Persistence hardening (T-022 review follow-ups) | core | sonnet | — | in-progress |  |
 | T-026 | Grouper onto shared repo methods + tests | core | sonnet | T-025 | pending | |
-| T-021 | Alert ingest + dedupe | core | sonnet | T-022 | in-review | #13 |
+| T-021 | Alert ingest + dedupe | core | sonnet | T-022 | merged | #13 |
 | T-023 | Incident grouper | core | sonnet | T-022 | merged | #11 |
-| T-027 | Ingest follow-ups (resolved updates, fixtures) | core | sonnet | T-021, T-025 | pending | |
-| T-024 | M2 acceptance: storm + replay | core | sonnet | T-021, T-023 | pending | |
+| T-027 | Ingest follow-ups (resolved updates, fixtures) | core | sonnet | T-021, T-024, T-025 | pending | |
+| T-024 | M2 acceptance: storm + replay | core | sonnet | T-021, T-023 | in-progress |  |
 | T-031 | LLM client + record/replay | agents | sonnet | — | merged | #7 |
-| T-032 | Agent runtime + tool gateway | agents | **opus** (high risk) | — | rework | #8 |
+| T-032 | Agent runtime + tool gateway | agents | **opus** (high risk) | — | in-review | #16 |
 
 ```
 T-011 ─► T-012 ─┐
