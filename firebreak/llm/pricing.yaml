@@ -1,0 +1,34 @@
+# Anthropic API pricing, USD per million tokens (MTok).
+# Source: https://platform.claude.com/docs/en/about-claude/pricing
+# Retrieved: 2026-10-27 (cross-checked against the claude-api skill model table cached 2026-10-06).
+# Cache writes are the 5-minute TTL rate (what `cache_control: ephemeral` uses).
+# Haiku 5.5 has a higher tier for prompts over 100,000 tokens
+# (prompt = input + cache read + cache write tokens). `max_prompt_tokens: null` = no upper bound.
+# Do not edit prices without re-checking the source URL.
+models:
+  claude-opus-5-5:
+    tiers:
+      - max_prompt_tokens: null
+        input: 4.00
+        cache_write: 5.00
+        cache_read: 0.20
+        output: 20.00
+  claude-sonnet-5-5:
+    tiers:
+      - max_prompt_tokens: null
+        input: 2.00
+        cache_write: 2.50
+        cache_read: 0.10
+        output: 10.00
+  claude-haiku-5-5:
+    tiers:
+      - max_prompt_tokens: 100000
+        input: 0.10
+        cache_write: 0.125
+        cache_read: 0.01
+        output: 0.50
+      - max_prompt_tokens: null
+        input: 0.50
+        cache_write: 0.625
+        cache_read: 0.05
+        output: 2.50
