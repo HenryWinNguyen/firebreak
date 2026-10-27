@@ -1,2 +1,54 @@
 # Shopfloor services (owned by track `target`, T-011/T-012).
-services: {}
+x-shopfloor: &shopfloor
+  build: .
+  environment: &shopfloor-env
+    SHOPFLOOR_DATABASE_URL: postgresql://firebreak:firebreak@postgres:5432/shopfloor
+    SHOPFLOOR_ADMIN_TOKEN: ${SHOPFLOOR_ADMIN_TOKEN:-dev-admin-token}
+    SHOPFLOOR_REDIS_HOST: redis
+    INVENTORY_URL: http://inventory:8102
+    ORDERS_URL: http://orders:8101
+
+services:
+  shopfloor-db-init:
+    image: pgvector/pgvector:pg16
+    restart: "no"
+    environment:
+      PGPASSWORD: firebreak
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for i in $$(seq 1 30); do pg_isready -h postgres -U firebreak && break; sleep 1; done
+        psql -h postgres -U firebreak -d firebreak -tc "SELECT 1 FROM pg_database WHERE datname='shopfloor'" | grep -q 1 \
+          || psql -h postgres -U firebreak -d firebreak -c "CREATE DATABASE shopfloor"
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  inventory:
+    <<: *shopfloor
+    command: uvicorn inventory.app:app --host 0.0.0.0 --port 8102 --no-access-log
+    ports: ["8102:8102"]
+    depends_on:
+      shopfloor-db-init: { condition: service_completed_successfully }
+
+  orders:
+    <<: *shopfloor
+    command: uvicorn orders.app:app --host 0.0.0.0 --port 8101 --no-access-log
+    ports: ["8101:8101"]
+    depends_on:
+      shopfloor-db-init: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+      inventory: { condition: service_started }
+
+  gateway:
+    <<: *shopfloor
+    command: uvicorn gateway.app:app --host 0.0.0.0 --port 8100 --no-access-log
+    ports: ["8100:8100"]
+    depends_on:
+      orders: { condition: service_started }
