@@ -9,12 +9,13 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from firebreak.models.agents import AgentConfig
 from firebreak.models.evidence import Evidence, EvidenceKind
 from firebreak.models.llm import LLMRequest, LLMResponse, ToolAccess, Usage
 from firebreak.tools.context import ToolContext
+from firebreak.tools.errors import InvalidToolArgs
 from firebreak.tools.registry import ToolOutput, ToolRegistry
 
 INCIDENT = "inc_test"
@@ -27,12 +28,14 @@ INJECTION = (
 
 
 class FakeEvidenceSink:
-    def __init__(self, *, fail_record: bool = False) -> None:
+    def __init__(self, *, fail_record: bool = False, delay_s: float = 0.0) -> None:
         self.stored: dict[str, tuple[Evidence, str]] = {}
         self.fail_record = fail_record
+        self.delay_s = delay_s  # simulates a hung database on record and exists
         self.exists_calls: list[tuple[str, list[str]]] = []
 
     async def record(self, evidence: Evidence, raw: str) -> Evidence:
+        await asyncio.sleep(self.delay_s)
         if self.fail_record:
             raise ConnectionError("db down")
         self.stored[evidence.id] = (evidence, raw)
@@ -40,6 +43,7 @@ class FakeEvidenceSink:
 
     async def exists(self, incident_id: str, evidence_ids: list[str]) -> set[str]:
         self.exists_calls.append((incident_id, list(evidence_ids)))
+        await asyncio.sleep(self.delay_s)
         return {
             i
             for i in evidence_ids
@@ -144,7 +148,9 @@ class NoArgs(BaseModel):
 
 
 async def echo(args: EchoArgs, ctx: ToolContext) -> ToolOutput:
-    return ToolOutput(kind=EvidenceKind.LOG_LINES, query=f"echo {args.text!r}", content=args.text)
+    return ToolOutput(
+        kind=EvidenceKind.LOG_LINES, query=f"echo len={len(args.text)}", content=args.text
+    )
 
 
 async def restart_service(args: RestartArgs, ctx: ToolContext) -> ToolOutput:
@@ -168,20 +174,57 @@ async def inject(args: NoArgs, ctx: ToolContext) -> ToolOutput:
     return ToolOutput(kind=EvidenceKind.LOG_LINES, query='{service="orders"}', content=INJECTION)
 
 
+async def own_timeout(args: NoArgs, ctx: ToolContext) -> ToolOutput:
+    raise TimeoutError("upstream read timed out")  # not the gateway's deadline
+
+
+async def refuses(args: NoArgs, ctx: ToolContext) -> ToolOutput:
+    raise InvalidToolArgs(INJECTION)  # a typed refusal whose text is handler-provided
+
+
+async def huge(args: NoArgs, ctx: ToolContext) -> ToolOutput:
+    return ToolOutput(kind=EvidenceKind.LOG_LINES, query="q", content="x" * 2_000_000)
+
+
+async def long_query(args: NoArgs, ctx: ToolContext) -> ToolOutput:
+    return ToolOutput(kind=EvidenceKind.LOG_LINES, query="q" * 5000, content="ok")
+
+
+class ExplodingArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str
+
+    @field_validator("text")
+    @classmethod
+    def explode(cls, v: str) -> str:
+        raise RuntimeError("validator bug")  # not converted by pydantic
+
+
 def make_registry() -> ToolRegistry:
     reg = ToolRegistry()
-    reg.register(name="echo", description="Echo text back.", args_model=EchoArgs, handler=echo)
-    reg.register(
-        name="restart_service",
-        description="Restart a service.",
-        args_model=RestartArgs,
-        handler=restart_service,
-        access=ToolAccess.WRITE,
-    )
-    reg.register(name="slow", description="Hangs.", args_model=NoArgs, handler=slow, timeout_s=0.05)
-    reg.register(name="boom", description="Raises.", args_model=NoArgs, handler=boom)
-    reg.register(name="bad_output", description="Bad.", args_model=NoArgs, handler=bad_output)
-    reg.register(name="inject", description="Hostile logs.", args_model=NoArgs, handler=inject)
+    read = ToolAccess.READ
+
+    def add(name: str, handler: Any, args: type[BaseModel] = NoArgs, **kw: Any) -> None:
+        reg.register(
+            name=name,
+            description=f"test tool {name}",
+            args_model=args,
+            handler=handler,
+            access=kw.pop("access", read),
+            **kw,
+        )
+
+    add("echo", echo, EchoArgs)
+    add("restart_service", restart_service, RestartArgs, access=ToolAccess.WRITE)
+    add("slow", slow, timeout_s=0.05)
+    add("boom", boom)
+    add("bad_output", bad_output)
+    add("inject", inject)
+    add("own_timeout", own_timeout)
+    add("refuses", refuses)
+    add("huge", huge)
+    add("long_query", long_query)
+    add("exploding", echo, ExplodingArgs)
     return reg
 
 

@@ -8,7 +8,7 @@ import pytest
 from firebreak.agents.runtime import MAX_TOOL_CALLS_PER_STEP, iter_cited_evidence_ids, run_agent
 from firebreak.models.agents import AgentConfig, AgentRunResult
 from firebreak.models.evidence import Evidence, EvidenceKind
-from firebreak.models.llm import LLMRequest, LLMResponse, Usage
+from firebreak.models.llm import LLMRequest, LLMResponse, ToolAccess, Usage
 from firebreak.tools.context import ToolContext
 from firebreak.tools.gateway import ToolGateway
 from firebreak.tools.registry import ToolOutput
@@ -53,7 +53,7 @@ async def test_happy_path() -> None:
     h = Harness([tool_response(ECHO), cite_last()])
     res = await h.run()
 
-    assert res.stopped_reason == "final_output"
+    assert res.stopped_reason == "final_output" and res.error is None
     assert res.agent == "echo" and res.incident_id == INCIDENT
     assert res.steps == 2 and len(h.llm.requests) == 2
     assert res.usage.cost_usd == pytest.approx(0.002) and res.usage.input_tokens == 20
@@ -121,6 +121,7 @@ async def test_repair_turn_failure() -> None:
     res = await h.run()
     assert res.stopped_reason == "error" and res.output == {}
     assert res.steps == 3 and len(h.llm.requests) == 3  # exactly one repair turn
+    assert res.error is not None and res.error.startswith("final answer invalid after repair")
 
 
 async def test_code_fenced_json_is_accepted() -> None:
@@ -244,7 +245,12 @@ async def test_tool_calls_run_in_parallel() -> None:
         return ToolOutput(kind=EvidenceKind.METRIC_SERIES, query="q", content="ok")
 
     h.registry.register(
-        name="meet", description="x", args_model=NoArgs, handler=meet, timeout_s=1.0
+        name="meet",
+        description="x",
+        args_model=NoArgs,
+        handler=meet,
+        access=ToolAccess.READ,
+        timeout_s=1.0,
     )
     h.llm.script = [tool_response(("a", "meet", {}), ("b", "meet", {})), cite_last()]
     res = await h.run()
@@ -267,7 +273,9 @@ async def test_too_many_tool_calls_in_one_turn() -> None:
 
 async def test_model_refusal_stops_with_error() -> None:
     refusal = LLMResponse(model="fake", content=[], stop_reason="refusal", usage=Usage())
-    assert (await Harness([refusal]).run()).stopped_reason == "error"
+    res = await Harness([refusal]).run()
+    assert res.stopped_reason == "error"
+    assert res.error == "the model refused to answer (stop_reason=refusal)"
 
 
 async def test_llm_errors_propagate() -> None:
@@ -287,3 +295,190 @@ def test_iter_cited_evidence_ids() -> None:
         "evidence_ids": "not-a-list",
     }
     assert sorted(set(iter_cited_evidence_ids(out))) == ["ev_a", "ev_b", "ev_c", "ev_d"]
+
+
+# --- rework round 1 -------------------------------------------------------------------
+
+
+async def test_fallback_model_is_passed_to_the_client() -> None:
+    h = Harness([tool_response(ECHO), cite_last()], fallback_model="fake-fallback")
+    await h.run()
+    assert [r.fallback_model for r in h.llm.requests] == ["fake-fallback", "fake-fallback"]
+    h2 = Harness([tool_response(ECHO), cite_last()])
+    await h2.run()
+    assert h2.llm.requests[0].fallback_model is None
+
+
+def _raw_tool_turn(*blocks: dict[str, Any]) -> LLMResponse:
+    return LLMResponse(
+        model="fake",
+        content=[{"type": "text", "text": "checking"}, *blocks],
+        stop_reason="tool_use",
+        usage=Usage(cost_usd=0.001),
+    )
+
+
+def _no_tool_use_echoed(req: LLMRequest) -> bool:
+    return all(
+        not (
+            isinstance(m["content"], list)
+            and any(b.get("type") == "tool_use" for b in m["content"])
+        )
+        for m in req.messages
+    )
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        ({"type": "tool_use", "name": "echo", "input": {"text": "a"}},),  # missing id
+        ({"type": "tool_use", "id": "", "name": "echo", "input": {"text": "a"}},),  # empty
+        ({"type": "tool_use", "id": "  ", "name": "echo", "input": {"text": "a"}},),  # blank
+        ({"type": "tool_use", "id": 7, "name": "echo", "input": {"text": "a"}},),  # not a str
+        (
+            {"type": "tool_use", "id": "dup", "name": "echo", "input": {"text": "a"}},
+            {"type": "tool_use", "id": "dup", "name": "echo", "input": {"text": "b"}},
+        ),
+    ],
+)
+async def test_malformed_tool_ids_use_the_repair_turn(blocks: tuple[dict[str, Any], ...]) -> None:
+    h = Harness([_raw_tool_turn(*blocks), tool_response(ECHO), cite_last()])
+    res = await h.run()
+    assert res.stopped_reason == "final_output"
+    retry = h.llm.requests[1]
+    # Nothing ran, no ids were invented, and the bad tool_use blocks were not echoed back.
+    assert h.sink.stored.keys() == {res.tool_calls[0].evidence_id}
+    assert [c.id for c in res.tool_calls] == ["toolu_1"]
+    assert _no_tool_use_echoed(retry)
+    assert retry.messages[-2] == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "checking"}],
+    }
+    assert "none of its tool calls ran" in retry.messages[-1]["content"]
+
+
+async def test_malformed_tool_ids_twice_is_an_error() -> None:
+    bad = _raw_tool_turn({"type": "tool_use", "name": "echo", "input": {"text": "a"}})
+    h = Harness([bad, bad])
+    res = await h.run()
+    assert res.stopped_reason == "error"
+    assert (
+        res.error
+        == "malformed tool turn after repair: a tool call had a missing, empty or invalid id"
+    )
+    assert res.tool_calls == [] and h.sink.stored == {}
+
+
+async def test_malformed_tool_turn_shares_the_single_repair() -> None:
+    bad = _raw_tool_turn({"type": "tool_use", "name": "echo", "input": {"text": "a"}})
+    h = Harness([bad, text_response("not json")], max_steps=8)
+    res = await h.run()
+    assert res.stopped_reason == "error" and len(h.llm.requests) == 2
+
+
+class _FlakyGateway(ToolGateway):
+    async def invoke(self, agent_cfg: AgentConfig, tool_name: str, *a: Any, **kw: Any) -> Any:
+        if tool_name == "boom":
+            raise RuntimeError("gateway bug")
+        return await super().invoke(agent_cfg, tool_name, *a, **kw)
+
+
+async def test_unexpected_gateway_exception_is_a_per_call_tool_error() -> None:
+    h = Harness([tool_response(("t_boom", "boom", {}), ECHO), cite_last()], tools=["echo", "boom"])
+    h.gateway = _FlakyGateway(h.registry)
+    res = await h.run()
+    assert res.stopped_reason == "final_output"
+    results = last_tool_results(h.llm.requests[1])
+    assert [r["tool_use_id"] for r in results] == ["t_boom", "toolu_1"]
+    assert results[0]["is_error"] and "code=internal_error" in results[0]["content"]
+    assert "gateway bug" not in results[0]["content"]
+    assert not results[1]["is_error"]
+
+
+async def test_cancelling_the_run_cancels_sibling_tool_calls() -> None:
+    h = Harness([], tools=["hang"])
+    started: list[str] = []
+    cancelled: list[str] = []
+    both_started = asyncio.Event()
+
+    async def hang(args: NoArgs, ctx: ToolContext) -> ToolOutput:
+        me = f"call{len(started)}"
+        started.append(me)
+        if len(started) == 2:
+            both_started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled.append(me)
+            raise
+        raise AssertionError("unreachable")
+
+    h.registry.register(
+        name="hang",
+        description="x",
+        args_model=NoArgs,
+        handler=hang,
+        access=ToolAccess.READ,
+        timeout_s=60,
+    )
+    h.llm.script = [tool_response(("a", "hang", {}), ("b", "hang", {}))]
+    task = asyncio.create_task(h.run())
+    await asyncio.wait_for(both_started.wait(), timeout=2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert sorted(cancelled) == ["call0", "call1"]
+
+
+async def test_empty_end_turn_is_not_echoed() -> None:
+    empty = LLMResponse(model="fake", content=[], stop_reason="end_turn", usage=Usage())
+    blank = text_response("   ")
+    for first in (empty, blank):
+        h = Harness([tool_response(ECHO), first, cite_last()])
+        res = await h.run()
+        assert res.stopped_reason == "final_output"
+        retry = h.llm.requests[2]
+        assert all(m["content"] not in ([], "") for m in retry.messages)
+        assert all(
+            not (m["role"] == "assistant" and m["content"] == [{"type": "text", "text": "   "}])
+            for m in retry.messages
+        )
+        # the repair text is merged into the trailing user turn (after the tool results)
+        last = retry.messages[-1]
+        assert last["role"] == "user" and retry.messages[-2]["role"] == "assistant"
+        assert last["content"][0]["type"] == "tool_result"
+        assert "only chance" in last["content"][-1]["text"]
+
+
+@pytest.mark.parametrize("bad_cost", [float("nan"), float("inf"), -1.0])
+async def test_non_finite_or_negative_cost_is_over_budget(bad_cost: float) -> None:
+    h = Harness([tool_response(ECHO, cost=bad_cost), cite_last()])
+    res = await h.run()
+    assert res.stopped_reason == "budget" and len(h.llm.requests) == 1
+
+
+async def test_evidence_exists_timeout_propagates() -> None:
+    h = Harness([tool_response(ECHO), cite_last()])
+    h.sink.delay_s = 0.0
+    sink = h.sink
+
+    original_exists = sink.exists
+
+    async def slow_exists(incident_id: str, ids: list[str]) -> set[str]:
+        await asyncio.sleep(5)
+        return await original_exists(incident_id, ids)
+
+    sink.exists = slow_exists  # type: ignore[method-assign]
+    with pytest.raises(TimeoutError):
+        await run_agent(h.cfg, "t", h.ctx, h.llm, h.gateway, evidence_timeout_s=0.05)
+
+
+async def test_repair_problem_text_is_bounded() -> None:
+    long_key = "X" * 5000
+    h = Harness([text_response(json.dumps({long_key: 1})), text_response("{}")])
+    res = await h.run()
+    assert res.stopped_reason == "error"
+    repair = h.llm.requests[1].messages[-1]["content"]
+    text = repair if isinstance(repair, str) else repair[-1]["text"]
+    assert len(text) < 1300 and long_key not in text
+    assert res.error is not None and len(res.error) < 1100

@@ -6,6 +6,12 @@ tool error for the model. None of them ever escapes ``ToolGateway.invoke``.
 
 from enum import StrEnum
 
+from pydantic import ValidationError
+
+#: Caps for model-facing (and logged) validation error text.
+MAX_LOC_PART_CHARS = 40
+MAX_ERROR_TEXT_CHARS = 1000
+
 
 class ToolErrorCode(StrEnum):
     UNKNOWN_TOOL = "unknown_tool"
@@ -17,6 +23,7 @@ class ToolErrorCode(StrEnum):
     INVALID_OUTPUT = "invalid_output"
     EVIDENCE_FAILED = "evidence_failed"
     TOO_MANY_CALLS = "too_many_calls"
+    INTERNAL_ERROR = "internal_error"
 
 
 class ToolError(Exception):
@@ -73,3 +80,26 @@ class EvidenceRecordFailed(ToolError):
 
 class TooManyToolCalls(ToolError):
     code = ToolErrorCode.TOO_MANY_CALLS
+
+
+class ToolInternalError(ToolError):
+    """The gateway itself failed unexpectedly. The call still gets a tool_result."""
+
+    code = ToolErrorCode.INTERNAL_ERROR
+
+
+def cap_text(text: str, limit: int = MAX_ERROR_TEXT_CHARS) -> str:
+    return text if len(text) <= limit else text[:limit] + " [...]"
+
+
+def format_validation_error(e: ValidationError, *, limit: int = MAX_ERROR_TEXT_CHARS) -> str:
+    """Pydantic errors as ``loc: msg; ...``, bounded and without input values.
+
+    ``loc`` parts can be model-supplied dict keys, so each is ``repr()``-ed and
+    truncated, and the whole text is capped.
+    """
+    parts: list[str] = []
+    for err in e.errors(include_url=False, include_input=False):
+        loc = ".".join(repr(p)[:MAX_LOC_PART_CHARS] for p in err["loc"]) or "<root>"
+        parts.append(f"{loc}: {cap_text(str(err['msg']), 200)}")
+    return cap_text("; ".join(parts), limit)

@@ -115,14 +115,71 @@ async def test_evidence_failure_is_a_tool_error() -> None:
     assert "hi" not in res.content  # an unrecorded result is never shown
 
 
-async def test_size_cap(ctx: ToolContext, sink: FakeEvidenceSink) -> None:
-    gw = ToolGateway(make_registry(), max_raw_chars=8000)
+async def test_size_cap(gw: ToolGateway, ctx: ToolContext, sink: FakeEvidenceSink) -> None:
     big = "x" * 9000
     res = await gw.invoke(make_cfg(), "echo", {"text": big}, ctx)
     assert res.evidence is not None
     ev, raw = sink.stored[res.evidence.id]
     assert len(ev.summary) <= 4000 and "truncated 5500 chars" in ev.summary
-    assert raw.startswith("x" * 8000) and "truncated 1000 chars" in raw
+    assert raw == big  # the full payload is stored; only the model-facing summary is capped
+
+
+async def test_content_over_hard_limit_rejected(
+    gw: ToolGateway, ctx: ToolContext, sink: FakeEvidenceSink
+) -> None:
+    res = await gw.invoke(make_cfg(tools=["huge"]), "huge", {}, ctx)
+    assert res.error_code is ToolErrorCode.INVALID_OUTPUT
+    assert "more than 1000000 chars" in res.content
+    assert sink.stored == {}
+
+
+async def test_overlong_query_rejected(
+    gw: ToolGateway, ctx: ToolContext, sink: FakeEvidenceSink
+) -> None:
+    res = await gw.invoke(make_cfg(tools=["long_query"]), "long_query", {}, ctx)
+    assert res.error_code is ToolErrorCode.INVALID_OUTPUT and sink.stored == {}
+
+
+async def test_evidence_record_timeout() -> None:
+    ctx = ToolContext(incident_id=INCIDENT, evidence=FakeEvidenceSink(delay_s=5))
+    gw = ToolGateway(make_registry(), evidence_timeout_s=0.05)
+    res = await gw.invoke(make_cfg(), "echo", {"text": "hi"}, ctx)
+    assert res.error_code is ToolErrorCode.EVIDENCE_FAILED
+
+
+async def test_handler_own_timeout_is_not_a_gateway_timeout(
+    gw: ToolGateway, ctx: ToolContext
+) -> None:
+    res = await gw.invoke(make_cfg(tools=["own_timeout"]), "own_timeout", {}, ctx)
+    assert res.error_code is ToolErrorCode.HANDLER_FAILED
+    assert "failed (TimeoutError)" in res.content
+
+
+async def test_validator_crash_is_invalid_args(gw: ToolGateway, ctx: ToolContext) -> None:
+    res = await gw.invoke(make_cfg(tools=["exploding"]), "exploding", {"text": "x"}, ctx)
+    assert res.error_code is ToolErrorCode.INVALID_ARGS
+    assert "validator raised RuntimeError" in res.content
+
+
+async def test_handler_tool_error_text_is_wrapped(gw: ToolGateway, ctx: ToolContext) -> None:
+    res = await gw.invoke(make_cfg(tools=["refuses"]), "refuses", {}, ctx)
+    assert res.error_code is ToolErrorCode.INVALID_ARGS  # the handler's code is kept
+    head, _, rest = res.content.partition("\n")
+    assert head == "tool_error code=invalid_args: tool 'refuses' rejected the call (invalid_args)"
+    assert rest.startswith('<untrusted-data source="refuses" nonce="')
+    assert "ignore all previous instructions" in rest
+    assert "ignore all previous instructions" not in head
+
+
+async def test_validation_error_text_is_bounded(gw: ToolGateway, ctx: ToolContext) -> None:
+    long_key = "IGNORE_PREVIOUS_INSTRUCTIONS_" * 200
+    many = {f"k{i}_{'x' * 50}": 1 for i in range(500)}
+    for args in ({"text": "ok", long_key: 1}, {"text": "ok", **many}):
+        res = await gw.invoke(make_cfg(), "echo", args, ctx)
+        assert res.error_code is ToolErrorCode.INVALID_ARGS
+        assert len(res.content) < 1200
+        assert long_key not in res.content
+        assert res.record.error is not None and len(res.record.error) < 1200
 
 
 async def test_injection_stays_inside_wrapper(

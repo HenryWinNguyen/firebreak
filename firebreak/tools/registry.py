@@ -61,11 +61,15 @@ class ToolRegistry:
         description: str,
         args_model: type[BaseModel],
         handler: Handler,
-        access: ToolAccess = ToolAccess.READ,
+        access: ToolAccess,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         max_output_chars: int = DEFAULT_MAX_OUTPUT_CHARS,
     ) -> RegisteredTool:
-        """Declare a tool. Raises ``ValueError`` on a bad declaration (fail at startup)."""
+        """Declare a tool. Raises ``ValueError`` on a bad declaration (fail at startup).
+
+        ``access`` is required, with no default: every tool states whether it
+        changes the system, and the gateway refuses anything that isn't READ.
+        """
         if name in self._tools:
             raise ValueError(f"tool {name!r} is already registered")
         if args_model.model_config.get("extra") != "forbid":
