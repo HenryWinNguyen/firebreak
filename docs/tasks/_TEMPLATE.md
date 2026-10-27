@@ -27,7 +27,7 @@ One or two sentences: what exists when this is done.
 - [ ] Behavior 2
 - [ ] Tests cover: <edge cases>
 - [ ] No silent failures: every caught exception is re-raised, logged with context, or turned into a typed error
-- [ ] PROGRESS.md entry added in the PR
+- [ ] PR description has a `## Progress entry` (builders don't edit PROGRESS.md)
 
 ## Verify command
 ```bash
