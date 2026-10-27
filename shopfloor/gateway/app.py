@@ -10,14 +10,16 @@ from typing import Any
 import httpx
 from common.app import create_base_app
 from common.errors import call_service
+from common.limits import MAX_QUANTITY
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from orders.app import MAX_QUANTITY
 from pydantic import BaseModel, Field
 
 
 class OrderRequest(BaseModel):
     product_id: int
-    quantity: int = Field(default=1, ge=1)
+    quantity: int = Field(default=1, ge=1, le=MAX_QUANTITY)
 
 
 def create_app(orders: httpx.AsyncClient | None = None) -> FastAPI:

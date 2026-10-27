@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import random
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any, Protocol
 
@@ -15,6 +16,7 @@ import redis.asyncio as aioredis
 from common.app import create_base_app
 from common.db import create_raw_pool
 from common.errors import DownstreamError, call_service
+from common.limits import MAX_QUANTITY
 from common.pool import BoundedPool
 from common.runtime import RuntimeSettings
 from fastapi import FastAPI
@@ -32,8 +34,9 @@ CACHE_KEY = "products"
 CACHE_TTL_SECONDS = 30
 RAW_POOL_MAX = 50  # hard ceiling; orders.db_pool_size is clamped to it
 ORDER_WORK_SECONDS = float(os.environ.get("SHOPFLOOR_ORDER_WORK_SECONDS", "0.02"))
-ITEM_QUERY_SECONDS = float(os.environ.get("SHOPFLOOR_ITEM_QUERY_SECONDS", "0.005"))
+ITEM_QUERY_SECONDS = float(os.environ.get("SHOPFLOOR_ITEM_QUERY_SECONDS", "0.25"))
 BAD_DEPLOY_ERROR_RATE = 0.1
+MAX_QUANTITY = 20
 
 
 def pool_size_fn(runtime: RuntimeSettings) -> Callable[[], int]:
@@ -49,12 +52,17 @@ class Cache(Protocol):
 
 class OrderRequest(BaseModel):
     product_id: int
-    quantity: int = Field(ge=1)
+    quantity: int = Field(ge=1, le=MAX_QUANTITY)
 
 
 class OrderStore:
-    def __init__(self, pool: BoundedPool) -> None:
+    def __init__(
+        self,
+        pool: BoundedPool,
+        sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
+    ) -> None:
         self.pool = pool
+        self._sleep = sleep  # injectable so tests can assert simulated query time
 
     async def init_schema(self) -> None:
         async with self.pool.acquire() as conn:
@@ -65,9 +73,11 @@ class OrderStore:
             if n_plus_one:
                 # S3: one lookup round trip per item instead of one for the whole cart.
                 for _ in range(quantity):
-                    await conn.execute("SELECT pg_sleep($1)", ITEM_QUERY_SECONDS)
+                    await conn.fetchval("SELECT 1")
+                    await self._sleep(ITEM_QUERY_SECONDS)
             else:
-                await conn.execute("SELECT pg_sleep($1)", ORDER_WORK_SECONDS)
+                await conn.fetchval("SELECT 1")
+                await self._sleep(ORDER_WORK_SECONDS)
             return int(
                 await conn.fetchval(
                     "INSERT INTO orders (product_id, quantity) VALUES ($1, $2) RETURNING id",
@@ -107,20 +117,20 @@ class SafeCache:
 
     async def get(self, key: str) -> str | None:
         try:
-            return await self._get_cache().get(key)  # type: ignore[no-any-return]
+            return await (await self._get_cache()).get(key)  # type: ignore[no-any-return]
         except CACHE_ERRORS as exc:
             self._failed("get", exc)
             return None
 
     async def set(self, key: str, value: str, ex: int | None = None) -> None:
         try:
-            await self._get_cache().set(key, value, ex=ex)
+            await (await self._get_cache()).set(key, value, ex=ex)
         except CACHE_ERRORS as exc:
             self._failed("set", exc)
 
     async def delete(self, key: str) -> None:
         try:
-            await self._get_cache().delete(key)
+            await (await self._get_cache()).delete(key)
         except CACHE_ERRORS as exc:
             self._failed("delete", exc)
 
@@ -136,13 +146,20 @@ class RedisProvider:
         self._host: str | None = None
         self._client: aioredis.Redis | None = None
 
-    def get(self) -> Cache:
+    async def get(self) -> Cache:
         host = str(self._runtime.get("orders.redis_host"))
         if self._client is None or host != self._host:
+            old = self._client
             self._client = aioredis.Redis(
-                host=host, port=6379, decode_responses=True, socket_connect_timeout=2
+                host=host,
+                port=6379,
+                decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=1,
             )
             self._host = host
+            if old is not None:
+                await old.aclose()
         return self._client  # type: ignore[return-value]
 
     async def close(self) -> None:
@@ -174,8 +191,10 @@ def create_app(
     def on_deploy(version: str, previous: str) -> None:
         if version.endswith("-bad"):
             runtime.set("orders.error_rate", BAD_DEPLOY_ERROR_RATE)  # S1
-        elif previous.endswith("-bad"):
-            runtime.set("orders.error_rate", 0.0)  # rolled back / fixed forward
+        else:
+            # Any non-bad deploy (rollback or fix-forward) resets error_rate to 0.0,
+            # overriding a manually set rate.
+            runtime.set("orders.error_rate", 0.0)
 
     provider = RedisProvider(runtime)
 
@@ -203,8 +222,8 @@ def create_app(
             if raw is not None:
                 await raw.close()
 
-    def get_cache() -> Cache:
-        return cache if cache is not None else provider.get()
+    async def get_cache() -> Cache:
+        return cache if cache is not None else await provider.get()
 
     app = create_base_app("orders", runtime, lifespan, on_deploy=on_deploy)
     app.state.leaked = leaked
@@ -257,8 +276,9 @@ def create_app(
             order_id = await app.state.store.insert(
                 req.product_id, req.quantity, bool(runtime.get("orders.n_plus_one"))
             )
-        except Exception:
-            await release_stock(req)
+        except (Exception, asyncio.CancelledError):
+            # Shielded so a cancelled request still returns the reserved stock.
+            await asyncio.shield(release_stock(req))
             raise
         await safe_cache.delete(CACHE_KEY)  # stock changed
         return {
