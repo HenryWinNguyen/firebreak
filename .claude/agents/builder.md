@@ -19,6 +19,8 @@ You are a builder on Firebreak. Your task id is in your spawn prompt.
    blocking item.
 6. Add your PROGRESS.md entry, commit on your branch `t-<id>-<slug>`, push the
    branch, and open a PR with `gh pr create` (the title starts with the task id).
+   Commit messages and PR bodies end with `Assisted with AI.`. No co-author trailers
+   or "Generated with" footers (CLAUDE.md "Commits and PRs").
    Never merge, never push to `main`, never force-push.
 7. Message `lead`: `<id> done, PR #N, verify: <command> green, reviewer: 0 blocking`.
    Or `<id> blocked: <one line>`, with the detail in the PR description.

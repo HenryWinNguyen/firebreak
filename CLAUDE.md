@@ -26,6 +26,12 @@ Read [docs/AGENT_WORKFLOW.md](./docs/AGENT_WORKFLOW.md). The short version:
   triggers in AGENT_WORKFLOW.md §6.2. Every other milestone end is an async
   summary in PROGRESS.md, then keep going.
 
+## Commits and PRs
+
+- **No AI attribution lines.** Don't add `Co-Authored-By` trailers or "Generated with"
+  footers. If attribution is wanted, the only allowed wording is a plain last line:
+  `Assisted with AI.`
+
 ## Conventions
 
 - **Python 3.12 + uv.** `make install` once per worktree (copy `.env.example` → `.env` if
