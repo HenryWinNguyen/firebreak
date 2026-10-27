@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from firebreak.llm.errors import FixtureMissing
@@ -36,7 +38,15 @@ class FixtureStore:
             "response": response.model_dump(mode="json"),
         }
         text = json.dumps(doc, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-        self.path_for(key).write_text(text)
+        # Atomic: a crash mid-write must never leave a truncated fixture under the final name.
+        fd, tmp = tempfile.mkstemp(dir=self.directory, prefix=f".{key}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, self.path_for(key))
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
         return key
 
     def load(self, request: LLMRequest) -> LLMResponse:
