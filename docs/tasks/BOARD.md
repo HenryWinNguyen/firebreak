@@ -18,7 +18,10 @@
 | T-024 | M2 acceptance: storm + replay | core | sonnet | T-021, T-023 | merged | #19 |
 | T-031 | LLM client + record/replay | agents | sonnet | — | merged | #7 |
 | T-032 | Agent runtime + tool gateway | agents | **opus** (high risk) | — | merged | #16 |
-| T-033 | LLM client + runtime follow-ups (T-031/T-032 minors) | agents | sonnet | T-031, T-032 | in-progress |  |
+| T-033 | LLM client + runtime follow-ups (T-031/T-032 minors) | agents | sonnet | T-031, T-032 | in-review | #25 |
+| T-034 | Read tools (Prometheus, Loki, deploys, service graph) | agents | sonnet | T-032 | ready | |
+| T-041 | Single-agent baseline (config, prompt, runner, CLI) | agents | sonnet | T-033, T-034 | pending | |
+| T-042 | M3 acceptance: live S1–S7 (**paid, needs Henry**) | evals | sonnet | T-014, T-041 | pending | |
 
 ```
 T-011 ─► T-012 ─┐
@@ -26,5 +29,6 @@ T-013 ──────────┴─► T-014            (M1 done)
 T-022 ─┬─► T-021 ─┐
        ├─► T-023 ─┴─► T-024           (M2 done)
        └─► T-025 ─► T-026
-T-031, T-032 ─► T-033                 (runtime ready for M3)
+T-031, T-032 ─► T-033 ─┐
+       T-032 ─► T-034 ─┴─► T-041 ─► T-042 (M3 done; T-042 needs Henry: API key + spend)
 ```
