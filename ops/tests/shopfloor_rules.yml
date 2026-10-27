@@ -1,0 +1,102 @@
+rule_files:
+  - ../prometheus/rules/shopfloor.yml
+evaluation_interval: 1m
+
+tests:
+  - name: HighErrorRate fires at 10% 5xx
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{service="orders",route="/orders",method="POST",status="500"}'
+        values: "0+10x15"
+      - series: 'http_requests_total{service="orders",route="/orders",method="POST",status="200"}'
+        values: "0+90x15"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: HighErrorRate
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: HighErrorRate
+        exp_alerts:
+          - exp_labels: { service: orders, severity: critical, env: demo }
+            exp_annotations:
+              summary: "orders 5xx ratio is 10% (> 5%)"
+
+  - name: HighErrorRate quiet at 1% 5xx
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{service="orders",status="500"}'
+        values: "0+1x15"
+      - series: 'http_requests_total{service="orders",status="200"}'
+        values: "0+99x15"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HighErrorRate
+        exp_alerts: []
+
+  - name: HighLatencyP95 fires when all requests take 2s
+    interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_bucket{service="gateway",route="/api/orders",le="1"}'
+        values: "0+0x15"
+      - series: 'http_request_duration_seconds_bucket{service="gateway",route="/api/orders",le="5"}'
+        values: "0+60x15"
+      - series: 'http_request_duration_seconds_bucket{service="gateway",route="/api/orders",le="+Inf"}'
+        values: "0+60x15"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: HighLatencyP95
+        exp_alerts:
+          - exp_labels: { service: gateway, severity: warning, env: demo }
+            exp_annotations:
+              summary: "gateway p95 latency is 4.8s (> 1s)"
+
+  - name: ServiceDown fires after 1m of failed scrapes
+    interval: 15s
+    input_series:
+      - series: 'up{job="inventory",service="inventory",instance="inventory:8102"}'
+        values: "0x20"
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: ServiceDown
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels:
+              service: inventory
+              job: inventory
+              instance: "inventory:8102"
+              severity: critical
+              env: demo
+            exp_annotations:
+              summary: "inventory is not responding to scrapes"
+
+  - name: DBPoolSaturated fires at 19/20
+    interval: 1m
+    input_series:
+      - series: 'db_pool_in_use{service="orders"}'
+        values: "19x10"
+      - series: 'db_pool_size{service="orders"}'
+        values: "20x10"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DBPoolSaturated
+        exp_alerts:
+          - exp_labels: { service: orders, severity: warning, env: demo }
+            exp_annotations:
+              summary: "orders DB pool is 95% in use (> 90%)"
+
+  - name: HighMemory fires above 400MiB
+    interval: 1m
+    input_series:
+      - series: 'process_resident_memory_bytes{job="orders",service="orders"}'
+        values: "500000000x10"
+      - series: 'process_resident_memory_bytes{job="gateway",service="gateway"}'
+        values: "100000000x10"
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HighMemory
+        exp_alerts:
+          - exp_labels: { job: orders, service: orders, severity: warning, env: demo }
+            exp_annotations:
+              summary: "orders RSS is 476.8MiB (> 400MB)"

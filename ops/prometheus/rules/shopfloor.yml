@@ -1,0 +1,44 @@
+# Alert rules, one per row of CONTRACTS 3.1.
+groups:
+  - name: shopfloor
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          sum by (service) (rate(http_requests_total{status=~"5.."}[5m]))
+            / sum by (service) (rate(http_requests_total[5m])) > 0.05
+        for: 2m
+        labels: { severity: critical, env: demo }
+        annotations:
+          summary: "{{ $labels.service }} 5xx ratio is {{ $value | humanizePercentage }} (> 5%)"
+
+      - alert: HighLatencyP95
+        expr: |
+          histogram_quantile(0.95,
+            sum by (service, le) (rate(http_request_duration_seconds_bucket[5m]))) > 1
+        for: 2m
+        labels: { severity: warning, env: demo }
+        annotations:
+          summary: "{{ $labels.service }} p95 latency is {{ $value | humanizeDuration }} (> 1s)"
+
+      - alert: ServiceDown
+        expr: up{job=~"gateway|orders|inventory"} == 0
+        for: 1m
+        labels: { severity: critical, env: demo }
+        annotations:
+          summary: "{{ $labels.service }} is not responding to scrapes"
+
+      - alert: DBPoolSaturated
+        expr: |
+          sum by (service) (db_pool_in_use) / sum by (service) (db_pool_size) > 0.9
+        for: 2m
+        labels: { severity: warning, env: demo }
+        annotations:
+          summary: "{{ $labels.service }} DB pool is {{ $value | humanizePercentage }} in use (> 90%)"
+
+      - alert: HighMemory
+        # 400 MiB
+        expr: process_resident_memory_bytes{job=~"gateway|orders|inventory"} > 400 * 1024 * 1024
+        for: 2m
+        labels: { severity: warning, env: demo }
+        annotations:
+          summary: "{{ $labels.service }} RSS is {{ $value | humanize1024 }}B (> 400MB)"

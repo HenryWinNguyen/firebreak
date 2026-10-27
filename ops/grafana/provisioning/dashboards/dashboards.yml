@@ -1,0 +1,5 @@
+apiVersion: 1
+providers:
+  - name: shopfloor
+    type: file
+    options: { path: /var/lib/grafana/dashboards }
