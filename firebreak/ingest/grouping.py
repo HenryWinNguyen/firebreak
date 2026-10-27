@@ -10,10 +10,9 @@ writes go through the session-taking ``*_in`` repository methods.
 import logging
 from datetime import timedelta
 
-from sqlalchemy import select, text
+from sqlalchemy import text
 
 from firebreak.db.repositories import AlertRepository, IncidentRepository, SessionFactory
-from firebreak.db.tables import IncidentAlertRow
 from firebreak.ingest.service_graph import ServiceGraph
 from firebreak.models.alert import Alert, AlertStatus
 from firebreak.models.common import Severity, utcnow
@@ -52,16 +51,17 @@ class PostgresIncidentGrouper:
 
             alert_id = await AlertRepository.insert_if_new_in(session, alert)
 
-            # The one query kept here: no repository method answers "is this alert linked".
-            existing = (
-                await session.execute(
-                    select(IncidentAlertRow.incident_id).where(
-                        IncidentAlertRow.alert_id == alert_id
-                    )
-                )
-            ).scalar_one_or_none()
+            existing = await IncidentRepository.find_incident_for_alert_in(session, alert_id)
             if existing is not None:
                 return GroupingDecision(incident_id=existing, created=False, duplicate=True)
+
+            if (
+                alert_id != alert.id
+                and not resolved
+                and await AlertRepository.get_status_in(session, alert_id) is AlertStatus.RESOLVED
+            ):
+                # Out of order: a firing replay after the resolved notification.
+                return GroupingDecision(incident_id=None, created=False, duplicate=True)
 
             open_inc = await IncidentRepository.find_open_for_cluster_in(
                 session, cluster, now, for_update=True

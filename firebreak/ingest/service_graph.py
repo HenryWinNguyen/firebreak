@@ -8,6 +8,7 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+MAX_WARNED_SERVICES = 1000
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / "config" / "service_graph.yaml"
 
 
@@ -76,8 +77,11 @@ class ServiceGraph:
     def cluster_of(self, service: str) -> str:
         cluster = self._service_to_cluster.get(service)
         if cluster is None:
-            if service not in self._warned:  # warn once per service, not per alert
-                self._warned.add(service)
+            # Warn once per service, not per alert. The set is capped so a flood of distinct
+            # names cannot grow memory; past the cap every call warns (no dedup).
+            if service not in self._warned:
+                if len(self._warned) < MAX_WARNED_SERVICES:
+                    self._warned.add(service)
                 logger.warning("unknown service %r; using its own singleton cluster", service)
             return f"singleton:{service}"
         return cluster

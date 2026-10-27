@@ -257,21 +257,41 @@ async def test_resolved_alert_attaches_without_severity_or_window_effects(
 async def test_concurrent_services_not_lost(
     sessions: async_sessionmaker[AsyncSession],
 ) -> None:
+    """Another transaction holds the incident row lock and has attached a service but not
+    committed. The grouper must wait on the row (FOR UPDATE) and then see that service."""
     g = grouper(sessions)
     d0 = await g.assign(make_alert("gateway"))
     incident_id = d0.incident_id or ""
     extra = make_alert("redis", n=99)
     assert await AlertRepository(sessions).insert_if_new(extra)
-    repo = IncidentRepository(sessions)
-    services = ["orders", "inventory", "postgres"]
-    await asyncio.gather(
-        repo.attach_alert(incident_id, extra.id, "redis"),
-        *(g.assign(make_alert(svc, n=i)) for i, svc in enumerate(services * 3, start=1)),
-    )
-    inc = await repo.get(incident_id)
+    now = utcnow()
+    async with sessions() as holder, holder.begin():
+        locked = await IncidentRepository.find_open_for_cluster_in(
+            holder, "shopfloor", now, for_update=True
+        )
+        assert locked is not None and locked.id == incident_id
+        await IncidentRepository.attach_alert_in(holder, incident_id, extra.id, "redis")
+        task = asyncio.create_task(g.assign(make_alert("orders", n=1)))
+        await asyncio.sleep(0.5)
+        assert not task.done()  # blocked on the row lock
+    d = await task
+    assert d.incident_id == incident_id and not d.created
+    inc = await IncidentRepository(sessions).get(incident_id)
     assert inc is not None
-    assert set(inc.services) == {"gateway", "redis", *services}
-    assert len(inc.services) == len(set(inc.services))
+    assert set(inc.services) == {"gateway", "redis", "orders"}
+
+
+async def test_firing_replay_after_resolved_is_not_grouped(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    g = grouper(sessions)
+    firing = make_alert("gateway")
+    await AlertRepository(sessions).insert_if_new(firing)
+    await AlertRepository(sessions).mark_resolved(firing.idempotency_key, utcnow())
+    d = await g.assign(firing.model_copy(update={"id": "al_replay"}))
+    assert d.incident_id is None and not d.created and d.duplicate
+    async with sessions() as s:
+        assert (await s.execute(text("SELECT count(*) FROM incidents"))).scalar_one() == 0
 
 
 async def test_unknown_service_warns_once_across_alerts(
