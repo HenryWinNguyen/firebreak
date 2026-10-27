@@ -28,8 +28,10 @@ groups:
           summary: "{{ $labels.service }} is not responding to scrapes"
 
       - alert: DBPoolSaturated
+        # Only services with a DB pool; the gateway exports db_pool_size=0.
         expr: |
-          sum by (service) (db_pool_in_use) / sum by (service) (db_pool_size) > 0.9
+          sum by (service) (db_pool_in_use{service=~"orders|inventory"})
+            / sum by (service) (db_pool_size{service=~"orders|inventory"}) > 0.9
         for: 2m
         labels: { severity: warning, env: demo }
         annotations:
