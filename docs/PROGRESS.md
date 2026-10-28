@@ -22,6 +22,10 @@ Repo: https://github.com/HenryWinNguyen/firebreak (public).
 ## Log
 
 ### 2026-10-28: M4 eval harness
+- **T-015** (#46): Alertmanager webhook token file is 0600 (verified in the pinned image); `honor_labels: true` removes the
+  spurious `exported_service` label (Shopfloor exports no `job`/`instance`, so routing, grouping and ingest are
+  unchanged); promtool tests moved to `ops/prometheus/tests/` with below-threshold and `for:`-pending cases per rule.
+  Backlog: pair each pending case with a later `eval_time` that asserts the fire.
 - **T-043** (#37, 1 rework): scenarios S1–S7 (`evals/scenarios/`) + deterministic grader (top-1/top-3, cited evidence kinds, report validity).
 - **T-044** (#40, Opus, 0 blocking): record/replay cassettes for LLM + tool calls. Replay has no live fallback; stale
   recordings raise `StaleRecordingError` naming the first difference. 20× round trip + 20× random-latency runs identical.
