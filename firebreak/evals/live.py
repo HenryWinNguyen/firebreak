@@ -46,6 +46,7 @@ from firebreak.tools.settings import ToolSettings
 logger = logging.getLogger(__name__)
 
 CLEAN_VERSION = "v1.0.0"
+CRASH_LIMIT = 5  # worker crashes tolerated per generator
 PRODUCT_EVERY = 5  # 1 request in 5 is GET /api/products (the M1 generator's mix)
 ALERT_KEY = tuple[str, str]  # (alertname, service)
 
@@ -138,11 +139,13 @@ class DriveState:
     uncleared: set[ALERT_KEY] = field(default_factory=set)
     #: A teardown step (reset, load stop) failed: the stack is in an unknown state.
     broken: list[str] = field(default_factory=list)
+    #: Sticky for the whole run: a clear-timeout stays an error even if the stack clears later.
+    clear_timeouts: list[str] = field(default_factory=list)
 
     @property
     def problems(self) -> list[str]:
-        out = list(self.broken)
-        if self.uncleared:
+        out = list(self.broken) + list(self.clear_timeouts)
+        if self.uncleared and not self.clear_timeouts:
             out.append(f"alerts still active after teardown: {sorted(self.uncleared)}")
         return out
 
@@ -213,10 +216,6 @@ async def active_alerts(client: httpx.AsyncClient, cfg: DriveConfig) -> set[ALER
 
 def expected_alerts(scenario: Scenario) -> set[ALERT_KEY]:
     return {(a.alertname, a.service) for a in scenario.expect.alerts}
-
-
-def _watch(active: set[ALERT_KEY], names: set[str]) -> set[ALERT_KEY]:
-    return {k for k in active if k[0] in names}
 
 
 # --- admin API ----------------------------------------------------------------------------
@@ -323,6 +322,8 @@ class LoadGenerator:
         self.ok = 0
         self.http_errors = 0
         self.transport_errors = 0
+        self.crashes = 0
+        self.first_crash: str | None = None
 
     async def prepare(self) -> None:
         try:
@@ -336,6 +337,7 @@ class LoadGenerator:
 
     async def _worker(self, n: int) -> None:
         i = n
+        streak = 0
         while True:
             started = time.monotonic()
             try:
@@ -351,8 +353,17 @@ class LoadGenerator:
                     self.ok += 1
                 else:
                     self.http_errors += 1
+                streak = 0
             except httpx.TransportError:
                 self.transport_errors += 1
+                streak = 0
+            except Exception as exc:  # noqa: BLE001  logged, counted, restarted
+                self.crashes += 1
+                streak += 1
+                if self.first_crash is None:
+                    self.first_crash = f"{type(exc).__name__}: {exc}"
+                logger.error("load worker %d crashed (%d so far): %r", n, self.crashes, exc)
+                await asyncio.sleep(min(0.05 * 2**streak, 2.0))  # bounded backoff, then restart
             i += self.workers
             await asyncio.sleep(max(0.0, self._interval_s - (time.monotonic() - started)))
 
@@ -362,8 +373,8 @@ class LoadGenerator:
         self._tasks = [asyncio.create_task(self._worker(n)) for n in range(self.workers)]
 
     async def stop(self) -> None:
-        """Cancel workers; raise if any of them died from something but cancellation."""
-        crashed = [
+        """Cancel workers; raise if the load was unhealthy or a worker died."""
+        dead = [
             exc
             for t in self._tasks
             if t.done() and not t.cancelled() and (exc := t.exception()) is not None
@@ -372,14 +383,21 @@ class LoadGenerator:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks = []
-        if crashed:
-            raise LiveDriveError(f"{len(crashed)} load worker(s) crashed: {crashed[0]!r}") from (
-                crashed[0]
+        attempts = self.ok + self.http_errors + self.transport_errors + self.crashes
+        if dead:
+            raise LiveDriveError(f"{len(dead)} load worker(s) died: {dead[0]!r}") from dead[0]
+        if self.crashes and (self.crashes >= CRASH_LIMIT or self.crashes > 0.1 * attempts):
+            raise LiveDriveError(
+                f"load generator unhealthy: {self.crashes} worker crash(es) in {attempts} "
+                f"requests (first: {self.first_crash})"
             )
+        if self.crashes:
+            logger.warning("load generator: %d worker crash(es), tolerated", self.crashes)
 
     def summary(self) -> str:
         return (
-            f"ok={self.ok} http_errors={self.http_errors} transport_errors={self.transport_errors}"
+            f"ok={self.ok} http_errors={self.http_errors} transport_errors={self.transport_errors} "
+            f"crashes={self.crashes}"
         )
 
 
@@ -413,18 +431,20 @@ async def wait_for_incident(
 async def wait_until_clean(
     plain: httpx.AsyncClient, cfg: DriveConfig, watch: set[ALERT_KEY]
 ) -> set[ALERT_KEY]:
-    """Poll until none of ``watch`` (by alertname) is active for ``clean_polls`` polls in a row.
+    """Poll until NO alert at all is active for ``clean_polls`` polls in a row.
+
+    (Any leftover alert could pull the next scenario's alert into an old incident through the
+    grouping window.) ``watch`` is only what is reported if the very first polls fail.
 
     Returns the alerts still active at the deadline (empty = clean). Polls that fail to reach
     Alertmanager/Prometheus are logged and count as not clean.
     """
-    names = {a for a, _ in watch}
     deadline = time.monotonic() + cfg.clean_timeout_s
     clean = 0
     still: set[ALERT_KEY] = set(watch)
     while True:
         try:
-            still = _watch(await active_alerts(plain, cfg), names)
+            still = await active_alerts(plain, cfg)
         except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
             logger.warning("clean-wait poll failed: %s", _describe(exc))
             clean = 0
@@ -449,21 +469,37 @@ async def _teardown(
     plain: httpx.AsyncClient,
     gen: LoadGenerator | None,
     state: DriveState,
-) -> None:
-    """Never raises (it runs in ``finally`` and must not mask the original error); every
-    failure is logged and stored in ``state`` so the batch fails and the next start refuses."""
+) -> str | None:
+    """Undo the scenario. Returns a load-health problem (the scenario's error) or None.
+
+    Cancellation (Ctrl-C) cannot abort the undo: the load stop and the reset finish first and
+    the ``CancelledError`` is re-raised afterwards. Other failures are logged and stored in
+    ``state`` so the run fails and the next start refuses."""
     sid = scenario.id
+    cancelled: asyncio.CancelledError | None = None
+    load_problem: str | None = None
     if gen is not None:
         try:
             await gen.stop()
             logger.info("scenario %s: load done (%s)", sid, gen.summary())
         except LiveDriveError as exc:
             logger.error("scenario %s: %s", sid, exc)
-            state.broken.append(f"{sid}: {exc}")
-    failures = await reset_stack(admin, cfg)
+            load_problem = f"scenario {sid}: {exc}"
+        except asyncio.CancelledError as exc:
+            cancelled = exc  # workers were cancelled by stop() itself; go on to the reset
+    reset_task = asyncio.ensure_future(reset_stack(admin, cfg))
+    while True:
+        try:
+            failures = await asyncio.shield(reset_task)
+            break
+        except asyncio.CancelledError as exc:
+            cancelled = exc  # keep waiting: the fault must be off before we leave
     if failures:
         state.broken.extend(f"{sid}: reset failed: {f}" for f in failures)
-        return  # waiting for alerts to clear is pointless while the fault may still be on
+    if cancelled is not None:
+        raise cancelled
+    if failures:
+        return load_problem  # waiting for alerts to clear is pointless while the fault may be on
     # Light healthy traffic refills the alert rules' rate windows so the alerts can resolve.
     keepalive: LoadGenerator | None = LoadGenerator(
         plain, cfg.gateway_url, rps=5, max_concurrency=3
@@ -491,9 +527,13 @@ async def _teardown(
             sorted(still),
         )
         state.uncleared |= still
+        state.clear_timeouts.append(
+            f"{sid}: alerts still active {cfg.clean_timeout_s:g}s after reset: {sorted(still)}"
+        )
     else:
         state.uncleared.clear()
         logger.info("scenario %s: stack clean again", sid)
+    return load_problem
 
 
 async def drive_scenario(
@@ -515,8 +555,6 @@ async def drive_scenario(
     """
     state = state if state is not None else DriveState()
     sid = scenario.id
-    expected = expected_alerts(scenario)
-    names = {a for a, _ in expected}
     # 1. refuse on a dirty stack
     if state.broken:
         raise DirtyStackError(
@@ -526,10 +564,9 @@ async def drive_scenario(
         active = await active_alerts(plain, cfg)
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
         raise LiveDriveError(f"scenario {sid}: cannot read alert state: {_describe(exc)}") from exc
-    busy = _watch(active, names | {a for a, _ in state.uncleared})
-    if busy:
+    if active:  # ANY alert: it could be grouped into an older incident
         raise DirtyStackError(
-            f"scenario {sid}: refusing to start, alerts already active: {sorted(busy)}"
+            f"scenario {sid}: refusing to start, alerts already active: {sorted(active)}"
         )
     state.uncleared.clear()
 
@@ -541,6 +578,7 @@ async def drive_scenario(
         max_concurrency=cfg.max_concurrency,
     )
     started = False
+    load_problem: str | None = None
     try:
         await gen.prepare()  # while healthy: a faulted gateway may not list products
         since = utcnow()
@@ -559,8 +597,13 @@ async def drive_scenario(
             poll_interval_s=cfg.poll_interval_s,
         )
         # 5. record
-        return await record(incident_id)
+        result = await record(incident_id)
     finally:
         # 6. teardown (anything applied or started is undone; a failed prepare() applied nothing)
         if started:
-            await _teardown(scenario, cfg=cfg, admin=admin, plain=plain, gen=gen, state=state)
+            load_problem = await _teardown(
+                scenario, cfg=cfg, admin=admin, plain=plain, gen=gen, state=state
+            )
+    if load_problem:
+        raise LiveDriveError(load_problem)
+    return result

@@ -335,7 +335,7 @@ async def test_load_generator_surfaces_crashed_workers() -> None:
         await gen.prepare()
         gen.start()
         await asyncio.sleep(0.05)
-        with pytest.raises(LiveDriveError, match="crashed"):
+        with pytest.raises(LiveDriveError, match="unhealthy"):
             await gen.stop()
 
 
@@ -430,3 +430,133 @@ def test_cli_exit_code_nonzero_when_a_scenario_errored(
     )
     assert code == 1
     assert "S1: error: LLMError: overflow" in capsys.readouterr().out
+
+
+async def test_unrelated_alert_blocks_the_preflight() -> None:
+    stack = FakeStack()
+    stack.fire("DiskFull", "inventory")  # not one of S1's alerts
+
+    async def record(inc_id: str) -> ScenarioOutcome:
+        raise AssertionError("must not record")
+
+    with pytest.raises(DirtyStackError, match="DiskFull"):
+        await drive(stack, S1, FakeSource(), record)
+    assert stack.calls == []
+
+
+async def test_clear_timeout_is_sticky_even_if_the_stack_clears_later() -> None:
+    stack = FakeStack()
+    src = FakeSource([incident("inc_1", ("HighErrorRate", "orders"))])
+    state = DriveState()
+
+    async def stuck(inc_id: str) -> ScenarioOutcome:
+        stack.fire("HighErrorRate", "orders")
+        return outcome("S1")
+
+    async def fine(inc_id: str) -> ScenarioOutcome:
+        return outcome("S1")
+
+    await drive(stack, S1, src, stuck, state)
+    assert len(state.clear_timeouts) == 1
+    stack.clear()
+    await drive(stack, S1, src, fine, state)  # clean again: the next scenario ran
+    assert state.uncleared == set()
+    assert any("still active" in p for p in state.problems)  # but the run still fails
+
+
+async def test_clean_wait_also_waits_for_unrelated_alerts() -> None:
+    stack = FakeStack()
+    src = FakeSource([incident("inc_1", ("HighErrorRate", "orders"))])
+    state = DriveState()
+
+    async def record(inc_id: str) -> ScenarioOutcome:
+        stack.fire("SomethingElse", "gateway")
+        return outcome("S1")
+
+    await drive(stack, S1, src, record, state)
+    assert state.clear_timeouts
+
+
+async def test_cancel_during_slow_reset_still_finishes_the_reset() -> None:
+    stack = FakeStack()
+    src = FakeSource([incident("inc_1", ("HighErrorRate", "orders"))])
+    resets = 0
+    slow = False
+    in_record = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal resets
+        if slow and request.url.host in ("orders", "inv"):
+            await asyncio.sleep(0.05)
+            resets += 1
+        return stack.handler(request)
+
+    async def record(inc_id: str) -> ScenarioOutcome:
+        nonlocal slow
+        slow = True
+        in_record.set()
+        await asyncio.sleep(10)
+        return outcome("S1")
+
+    async def run() -> ScenarioOutcome:
+        async with (
+            httpx.AsyncClient(transport=httpx.MockTransport(handler)) as admin,
+            stack.client() as plain,
+        ):
+            return await drive_scenario(
+                S1, record, cfg=CFG, admin=admin, plain=plain, incidents=src, state=DriveState()
+            )
+
+    task = asyncio.create_task(run())
+    await in_record.wait()
+    task.cancel()  # lands in record(); teardown starts its slow reset
+    await asyncio.sleep(0.02)
+    task.cancel()  # lands inside the reset
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert resets == 3  # chaos x2 and the clean deploy all completed
+
+
+async def test_load_worker_exceptions_are_counted_and_workers_restart() -> None:
+    first = True
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal first
+        if first:
+            first = False
+            return httpx.Response(200, json=[{"id": 1}])
+        raise httpx.DecodingError("bad body")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        gen = LoadGenerator(c, "http://gw", rps=100, max_concurrency=1)
+        await gen.prepare()
+        gen.start()
+        await asyncio.sleep(0.3)
+        assert gen.crashes >= 2  # the worker kept going after the first crash
+        with pytest.raises(LiveDriveError, match="unhealthy") as ei:
+            await gen.stop()
+    assert "DecodingError" in str(ei.value)
+
+
+async def test_unhealthy_load_becomes_the_scenario_error() -> None:
+    stack = FakeStack()
+    base = stack.handler
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "gw" and request.url.path != "/api/products":
+            raise httpx.DecodingError("bad body")
+        return base(request)
+
+    src = FakeSource([incident("inc_1", ("HighErrorRate", "orders"))])
+
+    async def record(inc_id: str) -> ScenarioOutcome:
+        await asyncio.sleep(0.2)
+        return outcome("S1")
+
+    async with (
+        httpx.AsyncClient(transport=httpx.MockTransport(handler)) as plain,
+        stack.client() as admin,
+    ):
+        with pytest.raises(LiveDriveError, match="unhealthy"):
+            await drive_scenario(S1, record, cfg=CFG, admin=admin, plain=plain, incidents=src)
+    assert paths(stack)[-3:] == RESET
