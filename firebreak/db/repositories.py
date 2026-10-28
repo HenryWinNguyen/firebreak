@@ -21,7 +21,7 @@ from firebreak.db.tables import (
     IncidentAlertRow,
     IncidentRow,
 )
-from firebreak.models.alert import Alert, AlertStatus
+from firebreak.models.alert import Alert, AlertSource, AlertStatus
 from firebreak.models.common import Severity, utcnow
 from firebreak.models.evidence import Evidence, EvidenceKind
 from firebreak.models.incident import TERMINAL_STATES, Incident, IncidentState
@@ -57,6 +57,22 @@ def _require_aware(**values: datetime | None) -> None:
     for name, value in values.items():
         if value is not None and value.utcoffset() is None:
             raise ValueError(f"{name} must be a timezone-aware datetime")
+
+
+def _alert_from_row(r: AlertRow) -> Alert:
+    return Alert(
+        id=r.id,
+        source=AlertSource(r.source),
+        fingerprint=r.fingerprint,
+        alertname=r.alertname,
+        service=r.service,
+        severity=Severity(r.severity),
+        status=AlertStatus(r.status),
+        summary=r.summary,
+        labels=dict(r.labels),
+        started_at=r.started_at,
+        ended_at=r.ended_at,
+    )
 
 
 class AlertRepository:
@@ -320,6 +336,28 @@ class IncidentRepository:
             if row is None:
                 return None
             return await self._to_model(session, row)
+
+    async def list_alerts(self, incident_id: str) -> list[Alert]:
+        """The alerts attached to an incident, ordered by ``started_at`` then ``id``.
+
+        Raises ``IncidentNotFoundError`` if the incident does not exist.
+        """
+        async with self._sessions() as session:
+            if await session.get(IncidentRow, incident_id) is None:
+                raise IncidentNotFoundError(incident_id)
+            rows = (
+                (
+                    await session.execute(
+                        select(AlertRow)
+                        .join(IncidentAlertRow, IncidentAlertRow.alert_id == AlertRow.id)
+                        .where(IncidentAlertRow.incident_id == incident_id)
+                        .order_by(AlertRow.started_at, AlertRow.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return [_alert_from_row(r) for r in rows]
 
     @staticmethod
     async def _to_model(session: AsyncSession, row: IncidentRow) -> Incident:

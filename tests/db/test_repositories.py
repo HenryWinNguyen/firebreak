@@ -371,3 +371,25 @@ async def test_find_incident_for_alert_in(sessions: Sessions) -> None:
         assert await IncidentRepository.find_incident_for_alert_in(session, linked.id) == inc.id
         assert await IncidentRepository.find_incident_for_alert_in(session, unlinked.id) is None
         assert await IncidentRepository.find_incident_for_alert_in(session, "al_nope") is None
+
+
+async def test_list_alerts_ordered_and_scoped(sessions: Sessions) -> None:
+    alerts = AlertRepository(sessions)
+    incidents = IncidentRepository(sessions)
+    t0 = utcnow().replace(microsecond=0)
+    late = make_alert("late", "orders", started_at=t0 + timedelta(seconds=5), summary="later")
+    early = make_alert("early", "inventory", started_at=t0, labels={"a": "b"}, ended_at=t0)
+    other = make_alert("other", "gateway", started_at=t0)
+    for a in (late, early, other):
+        await alerts.insert_if_new(a)
+    inc = await incidents.create(make_incident(alert_ids=[late.id]))
+    await incidents.attach_alert(inc.id, early.id, "inventory")
+    await incidents.create(make_incident(alert_ids=[other.id]))
+
+    got = await incidents.list_alerts(inc.id)
+    assert got == [early, late]  # by started_at; the other incident's alert is excluded
+
+
+async def test_list_alerts_unknown_incident(sessions: Sessions) -> None:
+    with pytest.raises(IncidentNotFoundError):
+        await IncidentRepository(sessions).list_alerts("inc_missing")
