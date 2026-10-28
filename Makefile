@@ -1,4 +1,4 @@
-.PHONY: install fmt lint typecheck test check owned up down logs
+.PHONY: install fmt lint typecheck test check owned up down logs migrate eval
 
 install:
 	uv sync
@@ -38,3 +38,6 @@ logs:
 
 eval:  ## Replay-mode evals over recorded scenarios ($0)
 	uv run python -m firebreak.evals run --mode replay --agent baseline && uv run python -m firebreak.evals report
+
+migrate:  ## Apply DB migrations to FIREBREAK_DATABASE_URL
+	uv run alembic -c firebreak/db/alembic.ini upgrade head
