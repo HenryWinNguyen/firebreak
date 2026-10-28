@@ -20,8 +20,8 @@
 | T-032 | Agent runtime + tool gateway | agents | **opus** (high risk) | — | merged | #16 |
 | T-033 | LLM client + runtime follow-ups (T-031/T-032 minors) | agents | sonnet | T-031, T-032 | merged | #25 |
 | T-034 | Read tools (Prometheus, Loki, deploys, service graph) | agents | sonnet | T-032 | merged | #28 |
-| T-035 | Read-tool hardening (T-034 minors) | agents | sonnet | T-034 | in-progress | |
-| T-041 | Single-agent baseline (config, prompt, runner, CLI) | agents | sonnet | T-033, T-034 | in-progress |  |
+| T-035 | Read-tool hardening (T-034 minors) | agents | sonnet | T-034 | rework | #31 |
+| T-041 | Single-agent baseline (config, prompt, runner, CLI) | agents | sonnet | T-033, T-034 | rework | #32 |
 | T-042 | M3 acceptance: live S1–S7 (**paid, needs Henry**) | evals | sonnet | T-014, T-041 | pending | |
 
 ```
