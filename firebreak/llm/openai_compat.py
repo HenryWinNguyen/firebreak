@@ -33,6 +33,18 @@ from firebreak.models.llm import LLMRequest, LLMResponse, Usage
 
 log = logging.getLogger(__name__)
 
+_CHARS_PER_TOKEN = 3  # conservative: real text is ~4 chars/token, so this over-estimates
+_TRUNCATION_RATIO = 0.98
+
+
+class ContextOverflowError(LLMError):
+    """The prompt (plus reply budget) does not fit the server's context window.
+
+    Defined here, not in ``errors.py``, to keep T-050 inside its owned paths. Never retried and
+    never triggers the fallback model: a different model does not fix a too-long conversation.
+    """
+
+
 _FINISH_REASONS = {
     "stop": "end_turn",
     "tool_calls": "tool_use",
@@ -139,6 +151,12 @@ def to_chat_params(request: LLMRequest) -> dict[str, Any]:
             for t in request.tools
         ]
     return params
+
+
+def estimate_prompt_tokens(params: dict[str, Any]) -> int:
+    """Conservative prompt-size estimate: serialized messages + tool schemas, chars / 3."""
+    chars = len(json.dumps(params["messages"])) + len(json.dumps(params.get("tools", [])))
+    return math.ceil(chars / _CHARS_PER_TOKEN)
 
 
 def _parse_arguments(raw: Any, *, name: Any, call_id: Any) -> Any:
@@ -271,6 +289,7 @@ class OpenAICompatLLMClient:
         max_retries = self._settings.openai_max_retries
         attempt = 0
         while True:
+            self._check_preflight(request)
             await self._limiter.acquire()
             try:
                 body = await self._post(request)
@@ -294,7 +313,36 @@ class OpenAICompatLLMClient:
                 attempt += 1
                 await self._sleep(delay)
                 continue
+            self._check_truncation(body, request.model)
             return self._to_response(body, requested_model=request.model)
+
+    def _check_preflight(self, request: LLMRequest) -> None:
+        limit = self._settings.openai_context_tokens
+        estimate = estimate_prompt_tokens(to_chat_params(request))
+        if estimate + request.max_tokens > limit:
+            raise ContextOverflowError(
+                f"context overflow for {request.model}: estimated prompt {estimate} tokens + "
+                f"max_tokens {request.max_tokens} > FIREBREAK_LLM_OPENAI_CONTEXT_TOKENS={limit}; "
+                "request not sent (the server would silently truncate it). Raise "
+                "OLLAMA_CONTEXT_LENGTH and FIREBREAK_LLM_OPENAI_CONTEXT_TOKENS together, or "
+                "shorten the conversation."
+            )
+
+    def _check_truncation(self, body: dict[str, Any], model: str) -> None:
+        usage = body.get("usage")
+        if not isinstance(usage, dict):
+            return
+        prompt = int(usage.get("prompt_tokens") or 0)
+        completion = int(usage.get("completion_tokens") or 0)
+        limit = self._settings.openai_context_tokens
+        if prompt + completion >= _TRUNCATION_RATIO * limit:
+            raise ContextOverflowError(
+                f"context overflow for {model}: prompt_tokens {prompt} + completion_tokens "
+                f"{completion} = {prompt + completion} >= 98% of "
+                f"FIREBREAK_LLM_OPENAI_CONTEXT_TOKENS={limit}; the server almost certainly "
+                "truncated the prompt, so the reply cannot be trusted. Raise "
+                "OLLAMA_CONTEXT_LENGTH and FIREBREAK_LLM_OPENAI_CONTEXT_TOKENS together."
+            )
 
     def _retry_delay(self, exc: _Retryable, attempt: int) -> float:
         if exc.response is not None:
