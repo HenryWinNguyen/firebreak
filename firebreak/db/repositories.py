@@ -9,13 +9,18 @@ Datetimes passed to any method must be timezone-aware (``ValueError`` otherwise)
 """
 
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import func, select, update
+from pydantic import BaseModel
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from firebreak.db.tables import (
     AlertRow,
+    EvalResultRow,
+    EvalRunRow,
     EvidenceBlobRow,
     EvidenceRow,
     IncidentAlertRow,
@@ -466,3 +471,152 @@ class PostgresEvidenceSink:
                 raw_ref=row.raw_ref,
                 untrusted=row.untrusted,
             )
+
+
+class EvalRun(BaseModel):
+    id: str
+    started_at: datetime
+    mode: str
+    agent: str
+    git_sha: str | None = None
+    prompt_sha256: str | None = None
+
+
+class EvalResult(BaseModel):
+    scenario_id: str
+    top1: bool
+    top3: bool
+    cited_kinds_ok: bool
+    report_valid: bool
+    cost_usd: float
+    latency_s: float
+    steps: int
+    error: str | None = None
+    report: dict[str, Any] | None = None
+
+
+class EvalRepository:
+    """Eval runs and results, plus the helpers a replay needs to start from a clean slate."""
+
+    def __init__(self, sessions: SessionFactory) -> None:
+        self._sessions = sessions
+
+    async def save_run(self, run: EvalRun, results: list[EvalResult]) -> None:
+        """Insert the run and all its results in one transaction."""
+        _require_aware(started_at=run.started_at)
+        async with self._sessions() as session, session.begin():
+            session.add(EvalRunRow(**run.model_dump()))
+            await session.flush()
+            session.add_all(EvalResultRow(run_id=run.id, **r.model_dump()) for r in results)
+
+    async def get_run(self, run_id: str) -> tuple[EvalRun, list[EvalResult]] | None:
+        async with self._sessions() as session:
+            row = await session.get(EvalRunRow, run_id)
+            if row is None:
+                return None
+            return await self._with_results(session, row)
+
+    async def latest_run_per_agent(self) -> list[tuple[EvalRun, list[EvalResult]]]:
+        """The newest run of each agent (by ``started_at``, then id), ordered by agent name."""
+        async with self._sessions() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(EvalRunRow)
+                        .ext(distinct_on(EvalRunRow.agent))
+                        .order_by(
+                            EvalRunRow.agent, EvalRunRow.started_at.desc(), EvalRunRow.id.desc()
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [await self._with_results(session, r) for r in rows]
+
+    @staticmethod
+    async def _with_results(
+        session: AsyncSession, row: EvalRunRow
+    ) -> tuple[EvalRun, list[EvalResult]]:
+        results = (
+            (
+                await session.execute(
+                    select(EvalResultRow)
+                    .where(EvalResultRow.run_id == row.id)
+                    .order_by(EvalResultRow.scenario_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        run = EvalRun(
+            id=row.id,
+            started_at=row.started_at,
+            mode=row.mode,
+            agent=row.agent,
+            git_sha=row.git_sha,
+            prompt_sha256=row.prompt_sha256,
+        )
+        return run, [
+            EvalResult(
+                scenario_id=r.scenario_id,
+                top1=r.top1,
+                top3=r.top3,
+                cited_kinds_ok=r.cited_kinds_ok,
+                report_valid=r.report_valid,
+                cost_usd=r.cost_usd,
+                latency_s=r.latency_s,
+                steps=r.steps,
+                error=r.error,
+                report=r.report,
+            )
+            for r in results
+        ]
+
+    async def evidence_kinds(self, incident_id: str) -> dict[str, EvidenceKind]:
+        """Evidence id -> kind for one incident (what the grader needs)."""
+        async with self._sessions() as session:
+            rows = await session.execute(
+                select(EvidenceRow.id, EvidenceRow.kind).where(
+                    EvidenceRow.incident_id == incident_id
+                )
+            )
+            return {r.id: EvidenceKind(r.kind) for r in rows}
+
+    async def purge_incident(self, incident_id: str) -> bool:
+        """Delete an incident with its evidence (and blobs) and its alerts. False if absent.
+
+        A replay recreates the recorded incident under its recorded ids, so a previous replay's
+        copy must go first. This removes *every* row under those ids.
+        """
+        async with self._sessions() as session, session.begin():
+            if await session.get(IncidentRow, incident_id) is None:
+                return False
+            alert_ids = (
+                (
+                    await session.execute(
+                        select(IncidentAlertRow.alert_id).where(
+                            IncidentAlertRow.incident_id == incident_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            raw_refs = (
+                (
+                    await session.execute(
+                        select(EvidenceRow.raw_ref).where(EvidenceRow.incident_id == incident_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            await session.execute(delete(IncidentRow).where(IncidentRow.id == incident_id))
+            if raw_refs:
+                await session.execute(
+                    delete(EvidenceBlobRow).where(EvidenceBlobRow.key.in_(raw_refs))
+                )
+            if alert_ids:
+                await session.execute(delete(AlertRow).where(AlertRow.id.in_(alert_ids)))
+        return True
