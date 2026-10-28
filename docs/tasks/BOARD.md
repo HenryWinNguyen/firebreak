@@ -26,8 +26,8 @@
 | T-042 | M3 acceptance: live S1–S7 (**paid, needs Henry**) | evals | sonnet | T-014, T-041, T-044, T-045 | **waiting on Henry** |  |
 | T-043 | Eval scenarios S1–S7 + deterministic grader | evals | sonnet | T-041 | merged | #37 |
 | T-044 | Record/replay cassettes (tools + LLM, deterministic) | evals | **opus** (high risk) | T-041 | merged | #40 |
-| T-045 | Eval runner, results tables, `make eval`, REPORT.md | evals | sonnet | T-043, T-044 | in-progress |  |
-| T-046 | Record/replay hardening + evidence ids at call start | evals | sonnet | T-044 | in-progress | |
+| T-045 | Eval runner, results tables, `make eval`, REPORT.md | evals | sonnet | T-043, T-044 | merged | #43 |
+| T-046 | Record/replay hardening + evidence ids at call start | evals | sonnet | T-044 | merged | #42 |
 
 ```
 T-011 ─► T-012 ─┐

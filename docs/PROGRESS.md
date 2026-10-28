@@ -11,15 +11,38 @@ milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 - **Spend:** each investigation is hard-capped at $0.50 (`budget_usd`), so a full S1–S7 run is ≤ $3.50; ≤ 1 re-run planned (≤ $7 total).
 - **Options:** (a) go as specced (Sonnet 5.5, Haiku 5.5 fallback); (b) a cheaper smoke run first (S1 only, ≤ $0.50); (c) hold.
 - **Recommendation:** (b) then (a): one scenario confirms the wiring end to end before spending on all seven.
-- **Timing:** the full run should happen after T-044/T-045 (record/replay), so the recordings can be replayed for $0 in CI. A $0.50 S1 smoke run can happen any time.
+- **Timing:** T-044/T-045/T-046 (record/replay + runner) are merged, so recordings made now replay for $0. Record with `python -m firebreak.evals run --mode record` (needs `FIREBREAK_EVAL_LIVE=1`); it reads the live incident read-only and writes only the recording dir and the `firebreak_eval` DB.
 - **Not blocked meanwhile:** M4 eval-harness work that runs on replay fixtures (no spend) continues.
 
 ## Current status
 
-**M2 done. M3 code done; live acceptance (T-042) waits on Henry.** M1 done. CP0 passed 2026-10-27. Board: `docs/tasks/BOARD.md`.
+**M2 done. M3 code done. M4 eval harness done (scenarios, grader, record/replay, runner); recordings wait on T-042 (Henry). T-016 (live S5–S7) in progress.** M1 done. CP0 passed 2026-10-27. Board: `docs/tasks/BOARD.md`.
 Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
 ## Log
+
+### 2026-10-28: M4 eval harness
+- **T-043** (#37, 1 rework): scenarios S1–S7 (`evals/scenarios/`) + deterministic grader (top-1/top-3, cited evidence kinds, report validity).
+- **T-044** (#40, Opus, 0 blocking): record/replay cassettes for LLM + tool calls. Replay has no live fallback; stale
+  recordings raise `StaleRecordingError` naming the first difference. 20× round trip + 20× random-latency runs identical.
+  Lead decision: untrusted-block nonces stay random in all modes (seeding them would make the injection boundary
+  predictable during live recording); `fixture_key` normalizes them instead.
+- **T-046** (#42, Opus, 0 blocking): nonce normalization anchored to real wrapper tags; secret scan adds base64/URL forms
+  and warns on short secrets; crash-safe overwrite; unconsumed recorded tool calls are stale; the gateway assigns
+  evidence ids at call start.
+- **T-045** (#43, 2 rework rounds, Opus re-reviews): `python -m firebreak.evals run|report`, `make eval`, `eval_runs`/
+  `eval_results` (migration 0002), `evals/REPORT.md`. Review caught a data-loss bug: replay purged the recorded
+  incident in the **dev** DB. Fixed: evals use only a dedicated `firebreak_eval` DB, and every write path checks
+  `current_database()` after connecting (a `?database=` URL override bypassed the name-only check in round 1); the purge
+  touches only rows listed in the recording and aborts on extra/shared links; record mode refuses eval DB == live DB.
+  `make eval` exits 1 ("no recordings found") until T-042 records.
+- Lead fix (#44): the test fixture's `_test` guard (it runs `DROP SCHEMA`) had the same `?database=` bypass; it now
+  rejects the parameter and re-checks `current_database()` before dropping.
+- Backlog (M10 hardening): secret scan misses a secret embedded inside a larger base64 blob (e.g. Basic auth) and
+  `quote()`-with-`/`/lowercase-`%2b` forms; a hard kill mid-overwrite leaves the old recording in a hidden dir with no
+  recovery, and crashed-run staging dirs accumulate; partial-consumption replay test; `run.json` written outside the
+  `record_run` staging dir; same-DB detection misses socket-vs-TCP to one server (compare `system_identifier`);
+  `?options=` raises a raw `TypeError`; fixed test DB names collide across concurrent local runs.
 
 ### 2026-10-28: M1 acceptance + live M2 reproduction
 - **T-014** (#20, 1 rework): S1–S4 each fire the expected alert on the live stack and clear after reset
