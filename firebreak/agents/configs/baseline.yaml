@@ -1,0 +1,17 @@
+# Single-agent baseline (T-041): one agent, every read tool, no orchestration.
+# Every later multi-agent result is compared against this.
+name: baseline
+model: claude-sonnet-5-5
+fallback_model: claude-haiku-5-5
+system_prompt: baseline.md
+tools:
+  - promql_query
+  - promql_range
+  - list_metrics
+  - logql_query
+  - recent_deploys
+  - service_graph
+max_steps: 16
+max_output_tokens: 4096
+budget_usd: 0.50
+output_schema: InvestigationReport
