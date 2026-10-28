@@ -122,9 +122,11 @@ class ToolGateway:
         call_id: str | None = None,
     ) -> ToolResult:
         call_id = call_id or new_id("tc")
+        # Assigned at call start so evidence ids follow call-start order, not completion order.
+        ev_id = new_id("ev")
         started = time.monotonic()
         try:
-            return await self._invoke(agent_cfg, tool_name, raw_args, ctx, call_id, started)
+            return await self._invoke(agent_cfg, tool_name, raw_args, ctx, call_id, ev_id, started)
         except ToolError as err:
             return self.error_result(
                 agent_cfg, tool_name, raw_args, err, ctx, call_id=call_id, started=started
@@ -152,12 +154,13 @@ class ToolGateway:
         raw_args: object,
         ctx: ToolContext,
         call_id: str,
+        ev_id: str,
         started: float,
     ) -> ToolResult:
         tool = self._authorize(agent_cfg, tool_name)
         args = self._validate(tool, raw_args)
         output = await self._run(tool, args, ctx)
-        evidence = await self._record(tool, output, ctx, call_id)
+        evidence = await self._record(tool, output, ctx, call_id, ev_id)
         record = ToolCallRecord(
             id=call_id,
             agent=agent_cfg.name,
@@ -332,11 +335,15 @@ class ToolGateway:
         )
 
     async def _record(
-        self, tool: RegisteredTool, output: ToolOutput, ctx: ToolContext, call_id: str
+        self,
+        tool: RegisteredTool,
+        output: ToolOutput,
+        ctx: ToolContext,
+        call_id: str,
+        ev_id: str,
     ) -> Evidence:
         # The size cap is applied last, on the exact (defanged) text the model will see.
         summary = render_untrusted(output.content, tool.max_output_chars)
-        ev_id = new_id("ev")
         evidence = Evidence(
             id=ev_id,
             incident_id=ctx.incident_id,
