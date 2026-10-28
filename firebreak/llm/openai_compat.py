@@ -331,6 +331,9 @@ class OpenAICompatLLMClient:
     def _check_truncation(self, body: dict[str, Any], model: str) -> None:
         usage = body.get("usage")
         if not isinstance(usage, dict):
+            log.warning(
+                "no usage in reply from %s; cannot check for silent context truncation", model
+            )
             return
         prompt = int(usage.get("prompt_tokens") or 0)
         completion = int(usage.get("completion_tokens") or 0)
