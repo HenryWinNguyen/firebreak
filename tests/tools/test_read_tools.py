@@ -193,7 +193,7 @@ async def test_timeout_every_backend(
 ) -> None:
     backend.fail = httpx.ReadTimeout("slow")
     r = await call(gw, sink, tool, args)
-    assert r.is_error and r.error_code is ToolErrorCode.HANDLER_FAILED
+    assert r.is_error and r.error_code is ToolErrorCode.TIMEOUT
     assert sink.stored == {}
 
 
@@ -457,3 +457,168 @@ async def test_adapters_aclose_closes_clients() -> None:
     ad = _dummy_adapters()
     await ad.aclose()
     assert ad.metrics._http._client.is_closed  # type: ignore[attr-defined]
+
+
+# --- T-035 hardening ---------------------------------------------------------------------
+
+NOW_US = datetime(2026, 10, 27, 12, 0, 0, 987654, tzinfo=UTC)
+
+
+def _gw_with(handler: Any, clock: Any) -> ToolGateway:
+    t = httpx.MockTransport(handler)
+    ad = ReadAdapters(
+        metrics=PrometheusAdapter("http://prom", timeout_s=1, transport=t),
+        logs=LokiAdapter("http://loki", timeout_s=1, transport=t),
+        deploys=ShopfloorAdapter(
+            {"orders": "http://orders"}, admin_token="t", timeout_s=1, transport=t
+        ),
+        graph=ServiceGraph.load(),
+    )
+    return ToolGateway(build_read_registry(ToolSettings(), ad, clock=clock))
+
+
+async def test_windows_truncated_to_whole_seconds(sink: FakeEvidenceSink, backend: Backend) -> None:
+    gw = _gw_with(backend, lambda: NOW_US)
+    r = await call(gw, sink, "promql_range", {"query": "up", "minutes_back": 15})
+    p = backend.requests[-1].url.params
+    assert p["end"] == "1793102400.000" and p["start"] == "1793101500.000"
+    assert "start=2026-10-27T11:45:00Z end=2026-10-27T12:00:00Z" in r.evidence.query
+    await call(gw, sink, "logql_query", {"query": '{a="b"}'})
+    assert backend.requests[-1].url.params["end"] == "1793102400000000000"
+    r = await call(gw, sink, "promql_query", {"query": "up"})
+    assert backend.requests[-1].url.params["time"] == "1793102400.000"
+    assert "@ 2026-10-27T12:00:00Z" in r.evidence.query
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("promql_range", {"query": "up"}),
+        ("list_metrics", {}),
+        ("recent_deploys", {"service": "orders"}),
+    ],
+)
+async def test_backend_error_and_http_500_per_tool(
+    gw: ToolGateway, sink: FakeEvidenceSink, backend: Backend, tool: str, args: dict[str, Any]
+) -> None:
+    err = {"status": "error", "errorType": "bad_data", "error": "nope"}
+    backend.prom = backend.names = err
+    backend.deploys = {"not": "a list"}
+    r = await call(gw, sink, tool, args)
+    assert r.is_error and r.error_code is ToolErrorCode.HANDLER_FAILED
+    backend.status = 500
+    r = await call(gw, sink, tool, args)
+    assert r.is_error and r.error_code is ToolErrorCode.HANDLER_FAILED
+    assert sink.stored == {}
+
+
+async def test_promql_query_truncation(
+    gw: ToolGateway, sink: FakeEvidenceSink, backend: Backend
+) -> None:
+    backend.prom = {
+        "status": "success",
+        "data": {
+            "resultType": "vector",
+            "result": [
+                {"metric": {"service": f"s{i}", "pad": "x" * 60}, "value": [1761566400, "1"]}
+                for i in range(200)
+            ],
+        },
+    }
+    r = await call(gw, sink, "promql_query", {"query": "up"})
+    assert not r.is_error and "truncated" in r.content
+    assert len(r.evidence.summary) <= 3500
+
+
+async def test_recent_deploys_truncation(
+    gw: ToolGateway, sink: FakeEvidenceSink, backend: Backend
+) -> None:
+    backend.deploys = [
+        {
+            "service": "orders",
+            "version": f"v{i}",
+            "deployed_at": f"2026-10-27T11:{i:02d}:00Z",
+            "message": "m" * 400,
+        }
+        for i in range(20)
+    ]
+    r = await call(gw, sink, "recent_deploys", {"service": "orders", "limit": 20})
+    assert not r.is_error
+    assert "truncated" in r.evidence.summary  # the gateway cap kicked in
+    assert "v19" in r.content  # the newest deploy survives the cap
+
+
+async def test_nan_and_inf_string_values_rendered_verbatim(
+    gw: ToolGateway, sink: FakeEvidenceSink, backend: Backend
+) -> None:
+    backend.prom = {
+        "status": "success",
+        "data": {
+            "resultType": "vector",
+            "result": [
+                {"metric": {"s": "a"}, "value": [1761566400, "NaN"]},
+                {"metric": {"s": "b"}, "value": [1761566400, "+Inf"]},
+                {"metric": {"s": "c"}, "value": [1761566400, "-Inf"]},
+            ],
+        },
+    }
+    r = await call(gw, sink, "promql_query", {"query": "up"})
+    assert not r.is_error
+    assert "NaN]" in r.content and "+Inf]" in r.content and "-Inf]" in r.content
+    json.loads(sink.stored[r.evidence.id][1])  # the stored blob is valid JSON
+
+
+async def test_bare_nan_in_backend_body_is_a_handler_error(sink: FakeEvidenceSink) -> None:
+    def h(req: httpx.Request) -> httpx.Response:
+        body = b'{"status":"success","data":{"resultType":"scalar","result":[1,NaN]}}'
+        return httpx.Response(200, content=body)
+
+    r = await call(_gw_with(h, lambda: NOW), sink, "promql_query", {"query": "up"})
+    assert r.is_error and r.error_code is ToolErrorCode.HANDLER_FAILED
+    assert sink.stored == {}
+
+
+def test_downsampling_is_deterministic() -> None:
+    from firebreak.tools.adapters.prometheus import Series
+    from firebreak.tools.read_tools import render_series
+
+    pts = [(1761566400.0 + 15 * j, str(j)) for j in range(1440)]
+    series = [Series({"s": str(i)}, list(pts)) for i in range(12)]
+    first = render_series(series)
+    assert "downsampled" in first
+    assert render_series(series) == first
+    assert f"[{_hms_of(pts[0][0])}, 0]" in first  # first point always kept
+    assert f"[{_hms_of(pts[-1][0])}, 1439]" in first  # and the last
+
+
+def _hms_of(ts: float) -> str:
+    return datetime.fromtimestamp(ts, UTC).strftime("%H:%M:%SZ")
+
+
+async def test_float_overflow_in_backend_body_is_a_handler_error(sink: FakeEvidenceSink) -> None:
+    def h(req: httpx.Request) -> httpx.Response:
+        body = b'{"status":"success","data":{"resultType":"scalar","result":[1,1e999]}}'
+        return httpx.Response(200, content=body)
+
+    r = await call(_gw_with(h, lambda: NOW), sink, "promql_query", {"query": "up"})
+    assert r.is_error and r.error_code is ToolErrorCode.HANDLER_FAILED
+    assert sink.stored == {}
+
+
+async def test_raw_blob_serialization_refuses_nan(sink: FakeEvidenceSink) -> None:
+    from firebreak.tools.adapters.prometheus import MetricResult
+
+    class NanMetrics:
+        async def instant(self, query: str, at: datetime) -> MetricResult:
+            return MetricResult("scalar", [], raw={"v": float("inf")})
+
+    t = httpx.MockTransport(Backend())
+    ad = ReadAdapters(
+        metrics=NanMetrics(),  # type: ignore[arg-type]
+        logs=LokiAdapter("http://l", timeout_s=1, transport=t),
+        deploys=ShopfloorAdapter({}, admin_token="t", timeout_s=1, transport=t),
+        graph=ServiceGraph.load(),
+    )
+    gw = ToolGateway(build_read_registry(ToolSettings(), ad, clock=lambda: NOW))
+    r = await call(gw, sink, "promql_query", {"query": "up"})
+    assert r.is_error and sink.stored == {}  # never stored as bare Infinity
