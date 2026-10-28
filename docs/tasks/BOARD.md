@@ -30,8 +30,8 @@
 | T-046 | Record/replay hardening + evidence ids at call start | evals | sonnet | T-044 | merged | #42 |
 | T-047 | OpenAI-compatible client (local Ollama) + baseline-local (hybrid) | agents | sonnet | T-045, T-046 | merged | #49 |
 | T-048 | Baseline CLI spend gate + OpenAI key in secret scan | agents | sonnet | T-047 | merged | #53 |
-| T-050 | Context-overflow guard for local models | agents | sonnet | T-047 | in-progress | |
-| T-049 | Local baseline run S1–S7 (`baseline-local`, $0) for CP1 | evals | lead | T-047, T-016, T-050 | waiting (Ollama installed; server restart + T-050) | |
+| T-050 | Context-overflow guard for local models | agents | sonnet | T-047 | merged | #56 |
+| T-049 | Local baseline run S1–S7 (`baseline-local`, $0) for CP1 | evals | lead | T-047, T-016, T-050 | waiting on Henry (restart `ollama serve` with 32k context) | |
 
 ```
 T-011 ─► T-012 ─┐
