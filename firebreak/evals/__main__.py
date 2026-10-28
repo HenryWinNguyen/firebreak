@@ -7,8 +7,6 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from sqlalchemy.engine import make_url
-
 from firebreak.config import Settings
 from firebreak.db.engine import make_engine, make_session_factory
 from firebreak.db.repositories import EvalRepository, SessionFactory
@@ -21,7 +19,8 @@ from firebreak.evals.runner import (
     ensure_eval_database,
     record_scenario,
     replay_all,
-    require_eval_database_name,
+    require_eval_session,
+    require_eval_url,
     require_live_env,
     scenario_key,
     select_scenarios,
@@ -68,7 +67,7 @@ def _names(raw: str) -> list[str]:
 
 def _eval_url(args: argparse.Namespace) -> str:
     url: str = args.database_url or EvalSettings().resolved_database_url()
-    require_eval_database_name(make_url(url).database)
+    require_eval_url(url)
     return url
 
 
@@ -168,7 +167,9 @@ async def _report(args: argparse.Namespace) -> int:
     scenarios = load_scenarios(args.scenarios_dir)
     engine = make_engine(_eval_url(args))
     try:
-        runs = await EvalRepository(make_session_factory(engine)).latest_run_per_agent()
+        sessions = make_session_factory(engine)
+        await require_eval_session(sessions)
+        runs = await EvalRepository(sessions).latest_run_per_agent()
     finally:
         await engine.dispose()
     path = write_report(render_report(runs, scenarios), args.out)

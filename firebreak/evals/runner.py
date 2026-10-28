@@ -105,16 +105,48 @@ def require_eval_database_name(name: str | None) -> None:
         )
 
 
-def _sessions_db_name(sessions: SessionFactory) -> str | None:
-    bind = sessions.kw.get("bind")
-    return None if bind is None else bind.url.database
+def require_eval_url(url: str) -> str:
+    """Validate a URL before use; returns its database name.
+
+    Rejects ``?database=`` / ``?dbname=``: asyncpg lets the query override the path, so the path
+    name alone proves nothing. The post-connect check (``require_eval_session``) is the real guard.
+    """
+    parsed = make_url(url)
+    bad = sorted(k for k in parsed.query if k.lower() in ("database", "dbname"))
+    if bad:
+        raise EvalRunError(
+            f"refusing eval database URL with query parameter(s) {bad}: they override the "
+            "database name in the path"
+        )
+    require_eval_database_name(parsed.database)
+    return str(parsed.database)
+
+
+async def _identity(sessions: SessionFactory) -> tuple[str, str | None, int | None]:
+    """The database the session really talks to: name, server address and port."""
+    async with sessions() as session:
+        row = (
+            await session.execute(
+                text("SELECT current_database(), inet_server_addr()::text, inet_server_port()")
+            )
+        ).one()
+    return str(row[0]), row[1], row[2]
+
+
+async def require_eval_session(sessions: SessionFactory) -> str:
+    """Apply the ``_eval``/``_test`` rule to ``SELECT current_database()`` on the real connection.
+
+    Call before any write, purge or migration through ``sessions``.
+    """
+    name = (await _identity(sessions))[0]
+    require_eval_database_name(name)
+    return name
 
 
 async def ensure_eval_database(url: str) -> None:
     """Create the eval database if missing (via the server's ``postgres`` db) and migrate it."""
+    name = require_eval_url(url)
     parsed = make_url(url)
-    require_eval_database_name(parsed.database)
-    name = str(parsed.database)
     admin = create_async_engine(
         parsed.set(database="postgres"), isolation_level="AUTOCOMMIT", poolclass=NullPool
     )
@@ -138,6 +170,9 @@ async def ensure_eval_database(url: str) -> None:
         await admin.dispose()
     eng = create_async_engine(url, poolclass=NullPool)
     try:
+        async with eng.connect() as conn:
+            actual = (await conn.execute(text("SELECT current_database()"))).scalar_one()
+        require_eval_database_name(actual)  # post-connect: what we are about to migrate
         async with eng.begin() as conn:
             await conn.run_sync(_upgrade_head)
     finally:
@@ -280,7 +315,7 @@ async def replay_scenario(
 
     Raises ``StaleRecordingError`` (naming the scenario) if the recording no longer matches.
     """
-    require_eval_database_name(_sessions_db_name(sessions))
+    await require_eval_session(sessions)
     key = scenario_key(scenario.id)
     directory = recording_dir(agent, key, root)
     if not (directory / META_FILE).exists():
@@ -335,7 +370,11 @@ async def record_scenario(
     is installed in the eval database (``sessions``), which is the only database written.
     """
     require_live_env(env)
-    require_eval_database_name(_sessions_db_name(sessions))
+    await require_eval_session(sessions)
+    if await _identity(sessions) == await _identity(live_sessions):
+        raise EvalRunError(
+            "refusing to record: the eval database and the live database are the same database"
+        )
     key = scenario_key(scenario.id)
     directory = recording_dir(agent, key, root)
     live = IncidentRepository(live_sessions)
@@ -432,6 +471,7 @@ async def store_run(
     graded = outcome.graded
     if not graded:
         raise EvalRunError("no scenario was graded; nothing to store")
+    await require_eval_session(sessions)
     shas = sorted({o.prompt_sha256 for o in graded if o.prompt_sha256})
     run = EvalRun(
         id=new_id("evr"),

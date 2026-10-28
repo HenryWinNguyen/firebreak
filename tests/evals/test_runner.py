@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -33,9 +33,13 @@ from firebreak.evals.runner import (
     EvalRunError,
     EvalSettings,
     LiveModeRefusedError,
+    RunOutcome,
+    ScenarioOutcome,
     ensure_eval_database,
     record_scenario,
     replay_all,
+    require_eval_session,
+    require_eval_url,
     require_live_env,
     scenario_key,
     select_scenarios,
@@ -105,18 +109,42 @@ async def seed_live_incident(sessions: SessionFactory) -> str:
     return inc.id
 
 
+LIVE_DB = "t045_live_test"
+
+
+@pytest.fixture
+async def live_sessions(migrated_url: str) -> AsyncIterator[SessionFactory]:
+    """A second database standing in for the live dev DB (record mode reads it, read-only)."""
+    base = make_url(migrated_url)
+    live_url = base.set(database=LIVE_DB).render_as_string(hide_password=False)
+    admin = create_async_engine(
+        base.set(database="postgres"), isolation_level="AUTOCOMMIT", poolclass=NullPool
+    )
+    async with admin.connect() as conn:
+        await conn.execute(text(f"DROP DATABASE IF EXISTS {LIVE_DB} WITH (FORCE)"))
+    await ensure_eval_database(live_url)  # create + migrate (the name ends _test)
+    eng = create_async_engine(live_url, poolclass=NullPool)
+    try:
+        yield make_session_factory(eng)
+    finally:
+        await eng.dispose()
+        async with admin.connect() as conn:
+            await conn.execute(text(f"DROP DATABASE IF EXISTS {LIVE_DB} WITH (FORCE)"))
+        await admin.dispose()
+
+
 async def make_recording(
-    root: Path, sessions: SessionFactory, live_sessions: SessionFactory | None = None
+    root: Path, sessions: SessionFactory, live_sessions: SessionFactory
 ) -> str:
     """A synthetic S1 recording through the real record path (scripted LLM, fake adapters)."""
-    incident_id = await seed_live_incident(live_sessions or sessions)
+    incident_id = await seed_live_incident(live_sessions)
     outcome = await record_scenario(
         S1,
         incident_id,
         agent="baseline",
         root=root,
         sessions=sessions,
-        live_sessions=live_sessions or sessions,
+        live_sessions=live_sessions,
         tools_settings=ToolSettings(),
         llm=script(),
         adapters=live_adapters(Live()),
@@ -216,10 +244,14 @@ def test_render_report_tables_and_summary() -> None:
 
 @pytest.mark.db
 async def test_replay_end_to_end_offline(
-    tmp_path: Path, engine: AsyncEngine, sessions: SessionFactory, no_http: list[str]
+    tmp_path: Path,
+    engine: AsyncEngine,
+    sessions: SessionFactory,
+    live_sessions: SessionFactory,
+    no_http: list[str],
 ) -> None:
     root = tmp_path / "recordings"
-    incident_id = await make_recording(root, sessions)
+    incident_id = await make_recording(root, sessions, live_sessions)
     assert (recording_dir("baseline", "s01", root) / RUN_FILE).exists()
     scenarios = select_scenarios(SCENARIOS, ["s01", "s02"])  # s02 has no recording
 
@@ -259,10 +291,14 @@ async def test_replay_end_to_end_offline(
 
 @pytest.mark.db
 async def test_stale_recording_fails_naming_the_scenario_and_stores_nothing(
-    tmp_path: Path, engine: AsyncEngine, sessions: SessionFactory, no_http: list[str]
+    tmp_path: Path,
+    engine: AsyncEngine,
+    sessions: SessionFactory,
+    live_sessions: SessionFactory,
+    no_http: list[str],
 ) -> None:
     root = tmp_path / "recordings"
-    await make_recording(root, sessions)
+    await make_recording(root, sessions, live_sessions)
     path = recording_dir("baseline", "s01", root) / RUN_FILE
     doc = json.loads(path.read_text())
     doc["alerts"][0]["summary"] = "a different alert text"  # the agent's prompt changes
@@ -282,10 +318,10 @@ async def test_stale_recording_fails_naming_the_scenario_and_stores_nothing(
 
 @pytest.mark.db
 async def test_recording_without_run_file_is_an_error_not_a_skip(
-    tmp_path: Path, sessions: SessionFactory, no_http: list[str]
+    tmp_path: Path, sessions: SessionFactory, live_sessions: SessionFactory, no_http: list[str]
 ) -> None:
     root = tmp_path / "recordings"
-    await make_recording(root, sessions)
+    await make_recording(root, sessions, live_sessions)
     (recording_dir("baseline", "s01", root) / RUN_FILE).unlink()
     with pytest.raises(EvalRunError, match=r"S1.*run\.json"):
         await replay_all(
@@ -295,7 +331,7 @@ async def test_recording_without_run_file_is_an_error_not_a_skip(
 
 @pytest.mark.db
 async def test_replay_with_nothing_recorded_stores_nothing(
-    tmp_path: Path, sessions: SessionFactory, no_http: list[str]
+    tmp_path: Path, sessions: SessionFactory, live_sessions: SessionFactory, no_http: list[str]
 ) -> None:
     outcome = await replay_all(
         [S1], agent="baseline", root=tmp_path, sessions=sessions, tools_settings=ToolSettings()
@@ -311,11 +347,12 @@ async def test_cli_run_then_report(
     migrated_url: str,
     engine: AsyncEngine,
     sessions: SessionFactory,
+    live_sessions: SessionFactory,
     no_http: list[str],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     root = tmp_path / "recordings"
-    await make_recording(root, sessions)
+    await make_recording(root, sessions, live_sessions)
     out = tmp_path / "REPORT.md"
     base = ["--database-url", migrated_url]
     run_args = [
@@ -358,28 +395,105 @@ def test_default_eval_url_is_firebreak_eval_on_the_dev_server(
     assert make_url(EvalSettings(_env_file=None).resolved_database_url()).database == "other_eval"
 
 
+def test_url_query_database_override_is_rejected() -> None:
+    for key in ("database", "dbname", "DATABASE"):
+        url = f"postgresql+asyncpg://x:x@127.0.0.1:1/firebreak_probe_eval?{key}=firebreak_live"
+        with pytest.raises(EvalRunError, match="override"):
+            require_eval_url(url)
+    assert require_eval_url("postgresql+asyncpg://x:x@h/foo_eval?ssl=false") == "foo_eval"
+
+
 @pytest.mark.db
-async def test_replay_refuses_sessions_on_a_non_eval_database(
-    tmp_path: Path, migrated_url: str
+async def test_query_override_bypass_is_refused_before_any_write(
+    migrated_url: str, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    url = make_url(migrated_url).set(database="firebreak")
-    eng = create_async_engine(url, poolclass=NullPool)  # lazy: never connects
-    with pytest.raises(EvalRunError, match="must end with"):
-        await replay_all(
-            [S1],
+    base = make_url(migrated_url)
+    sneaky = base.set(database="firebreak_probe_eval", query={"database": "postgres"})
+    url = sneaky.render_as_string(hide_password=False)
+    with pytest.raises(EvalRunError, match="override"):
+        await ensure_eval_database(url)
+    assert await asyncio.to_thread(main, ["--database-url", url, "run", "--mode", "replay"]) == 1
+    assert "override" in capsys.readouterr().err
+    assert await asyncio.to_thread(main, ["--database-url", url, "report"]) == 1
+    # nothing was created: the probe database does not exist
+    admin = create_async_engine(base.set(database="postgres"), poolclass=NullPool)
+    async with admin.connect() as conn:
+        q = text("SELECT count(*) FROM pg_database WHERE datname = 'firebreak_probe_eval'")
+        assert (await conn.execute(q)).scalar_one() == 0
+    await admin.dispose()
+
+
+@pytest.mark.db
+async def test_current_database_mismatch_is_refused_before_any_write(
+    tmp_path: Path, migrated_url: str, live_sessions: SessionFactory
+) -> None:
+    """Sessions that really point at a non-eval database (here `postgres`) are refused."""
+    url = make_url(migrated_url).set(database="postgres")
+    eng = create_async_engine(url, poolclass=NullPool)
+    bad = make_session_factory(eng)
+    try:
+        with pytest.raises(EvalRunError, match="'postgres'"):
+            await require_eval_session(bad)
+        with pytest.raises(EvalRunError, match="'postgres'"):
+            await replay_all(
+                [S1], agent="baseline", root=tmp_path, sessions=bad, tools_settings=ToolSettings()
+            )
+        with pytest.raises(EvalRunError, match="'postgres'"):
+            await store_run(
+                RunOutcome(outcomes=[ScenarioOutcome("S1", _result("S1", True, 0.1, 1.0))]),
+                mode="replay",
+                agent="baseline",
+                sessions=bad,
+            )
+        with pytest.raises(EvalRunError, match="'postgres'"):
+            await record_scenario(
+                S1,
+                "inc_x",
+                agent="baseline",
+                root=tmp_path,
+                sessions=bad,
+                live_sessions=live_sessions,
+                tools_settings=ToolSettings(),
+                llm=script(),
+                adapters=live_adapters(Live()),
+                env=LIVE_ENV,
+            )
+    finally:
+        await eng.dispose()
+    assert await require_eval_session(live_sessions) == LIVE_DB
+
+
+@pytest.mark.db
+async def test_record_refuses_when_eval_and_live_are_the_same_database(
+    tmp_path: Path, sessions: SessionFactory
+) -> None:
+    incident_id = await seed_live_incident(sessions)
+    with pytest.raises(EvalRunError, match="same database"):
+        await record_scenario(
+            S1,
+            incident_id,
             agent="baseline",
             root=tmp_path,
-            sessions=make_session_factory(eng),
+            sessions=sessions,
+            live_sessions=sessions,
             tools_settings=ToolSettings(),
+            llm=script(),
+            adapters=live_adapters(Live()),
+            env=LIVE_ENV,
         )
+    assert not (tmp_path / "baseline").exists()
 
 
 @pytest.mark.db
 async def test_replay_refuses_when_the_eval_db_has_an_extra_alert_on_the_incident(
-    tmp_path: Path, engine: AsyncEngine, sessions: SessionFactory, no_http: list[str]
+    tmp_path: Path,
+    engine: AsyncEngine,
+    sessions: SessionFactory,
+    live_sessions: SessionFactory,
+    no_http: list[str],
 ) -> None:
     root = tmp_path / "recordings"
-    incident_id = await make_recording(root, sessions)
+    incident_id = await make_recording(root, sessions, live_sessions)
     extra = Alert(
         source=AlertSource.ALERTMANAGER,
         fingerprint="fp-late",
@@ -402,10 +516,14 @@ async def test_replay_refuses_when_the_eval_db_has_an_extra_alert_on_the_inciden
 
 @pytest.mark.db
 async def test_replay_refuses_an_alert_shared_with_another_incident(
-    tmp_path: Path, engine: AsyncEngine, sessions: SessionFactory, no_http: list[str]
+    tmp_path: Path,
+    engine: AsyncEngine,
+    sessions: SessionFactory,
+    live_sessions: SessionFactory,
+    no_http: list[str],
 ) -> None:
     root = tmp_path / "recordings"
-    incident_id = await make_recording(root, sessions)
+    incident_id = await make_recording(root, sessions, live_sessions)
     (alert_id,) = (await IncidentRepository(sessions).list_alerts(incident_id))[0].id.split()
     other = await IncidentRepository(sessions).create(
         Incident(
@@ -429,35 +547,40 @@ async def test_replay_refuses_an_alert_shared_with_another_incident(
 
 
 @pytest.mark.db
-async def test_ensure_eval_database_creates_migrates_and_isolates_record_mode(
-    tmp_path: Path, migrated_url: str, engine: AsyncEngine, sessions: SessionFactory
-) -> None:
-    """Record reads the live DB and writes only the recording dir and the eval DB."""
+async def test_ensure_eval_database_creates_and_migrates_idempotently(migrated_url: str) -> None:
     base = make_url(migrated_url)
     eval_url = base.set(database="t045_runner_eval").render_as_string(hide_password=False)
     admin = create_async_engine(
         base.set(database="postgres"), isolation_level="AUTOCOMMIT", poolclass=NullPool
     )
     async with admin.connect() as conn:
-        await conn.execute(text("DROP DATABASE IF EXISTS t045_runner_eval"))
+        await conn.execute(text("DROP DATABASE IF EXISTS t045_runner_eval WITH (FORCE)"))
     try:
         await ensure_eval_database(eval_url)
-        await ensure_eval_database(eval_url)  # idempotent
-        eval_eng = create_async_engine(eval_url, poolclass=NullPool)
+        await ensure_eval_database(eval_url)
+        eng = create_async_engine(eval_url, poolclass=NullPool)
         try:
-            eval_sessions = make_session_factory(eval_eng)
-            incident_id = await make_recording(tmp_path / "rec", eval_sessions, sessions)
-            async with engine.connect() as conn:  # live DB: only the seeded incident, untouched
-                assert (
-                    await conn.execute(text("SELECT count(*) FROM incidents"))
-                ).scalar_one() == 1
-                assert (await conn.execute(text("SELECT count(*) FROM evidence"))).scalar_one() == 0
-            assert await IncidentRepository(eval_sessions).get(incident_id) is not None
-            async with eval_eng.connect() as conn:
-                assert (await conn.execute(text("SELECT count(*) FROM evidence"))).scalar_one() == 6
+            async with eng.connect() as conn:
+                n = (await conn.execute(text("SELECT count(*) FROM eval_runs"))).scalar_one()
+            assert n == 0
         finally:
-            await eval_eng.dispose()
+            await eng.dispose()
     finally:
         async with admin.connect() as conn:
             await conn.execute(text("DROP DATABASE IF EXISTS t045_runner_eval WITH (FORCE)"))
         await admin.dispose()
+
+
+@pytest.mark.db
+async def test_record_reads_live_and_writes_only_recording_and_eval_db(
+    tmp_path: Path, engine: AsyncEngine, sessions: SessionFactory, live_sessions: SessionFactory
+) -> None:
+    incident_id = await make_recording(tmp_path / "rec", sessions, live_sessions)
+    n = "SELECT count(*) FROM "
+    live_eng = live_sessions.kw["bind"]
+    async with live_eng.connect() as conn:  # live DB: the seeded incident, nothing else
+        assert (await conn.execute(text(n + "incidents"))).scalar_one() == 1
+        assert (await conn.execute(text(n + "evidence"))).scalar_one() == 0
+    assert await IncidentRepository(sessions).get(incident_id) is not None
+    async with engine.connect() as conn:
+        assert (await conn.execute(text(n + "evidence"))).scalar_one() == 6
