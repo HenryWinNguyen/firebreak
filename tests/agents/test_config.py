@@ -38,9 +38,7 @@ def _write(
 
 
 def test_example_echo_config_loads() -> None:
-    cfgs = load_agent_configs(make_registry())
-    assert "echo" in cfgs
-    echo = cfgs["echo"]
+    echo = load_agent_config(CONFIGS_DIR / "echo.yaml", make_registry())
     assert echo.tools == ["echo"] and echo.output_schema == "SpecialistReport"
     assert (CONFIGS_DIR / "echo.yaml").is_file() and (PROMPTS_DIR / "echo.md").is_file()
 
