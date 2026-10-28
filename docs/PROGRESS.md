@@ -17,6 +17,8 @@ milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
   (separate from the Claude subscription); a $5 top-up with auto-reload off covers it. Still needs: the key in
   `.env` and a go-ahead at run time. For local runs Henry installs Ollama (`brew install ollama`,
   `ollama pull qwen3:8b`).
+- **Free local runs are ready (T-047 merged).** Henry: `brew install ollama`, `ollama serve`, `ollama pull qwen3:8b`,
+  then the lead runs `baseline-local` on S1–S7 for $0.
 - **Not blocked meanwhile:** M4 eval-harness work that runs on replay fixtures (no spend) continues.
 
 ## Current status
@@ -27,6 +29,15 @@ Repo: https://github.com/HenryWinNguyen/firebreak (public).
 ## Log
 
 ### 2026-10-28: M4 eval harness
+- **T-047** (#49, 1 rework, Opus review): hybrid model plan. `OpenAICompatLLMClient` (Ollama / any OpenAI-compatible
+  server) translates the Anthropic-shaped contract internally; `RoutingLLMClient` picks the provider per model from
+  `pricing.yaml` (`provider` required; unknown model = typed error, never a default to Anthropic). `baseline-local`
+  (Qwen3 8B, same prompt/tools) runs via `python -m firebreak.evals run --agent baseline-local`; it needs only
+  `FIREBREAK_EVAL_LIVE=1`, never an Anthropic key. Malformed tool args reach the gateway as `invalid_args` and are
+  echoed to the server as `{}`. `investigate()` takes `config_path` (lead grant #50).
+  Backlog: the baseline CLI (`python -m firebreak.agents.baseline`) can reach Anthropic without `FIREBREAK_EVAL_LIVE`
+  (pre-existing; add a live gate); add `openai_api_key` to the recording secret scan; confirm against a real Ollama
+  that malformed history is accepted (run the `FIREBREAK_OLLAMA=1` integration test once installed).
 - **T-015** (#46): Alertmanager webhook token file is 0600 (verified in the pinned image); `honor_labels: true` removes the
   spurious `exported_service` label (Shopfloor exports no `job`/`instance`, so routing, grouping and ingest are
   unchanged); promtool tests moved to `ops/prometheus/tests/` with below-threshold and `for:`-pending cases per rule.

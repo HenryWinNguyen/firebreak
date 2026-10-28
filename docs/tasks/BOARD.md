@@ -28,7 +28,7 @@
 | T-044 | Record/replay cassettes (tools + LLM, deterministic) | evals | **opus** (high risk) | T-041 | merged | #40 |
 | T-045 | Eval runner, results tables, `make eval`, REPORT.md | evals | sonnet | T-043, T-044 | merged | #43 |
 | T-046 | Record/replay hardening + evidence ids at call start | evals | sonnet | T-044 | merged | #42 |
-| T-047 | OpenAI-compatible client (local Ollama) + baseline-local (hybrid) | agents | sonnet | T-045, T-046 | in-progress | |
+| T-047 | OpenAI-compatible client (local Ollama) + baseline-local (hybrid) | agents | sonnet | T-045, T-046 | merged | #49 |
 
 ```
 T-011 ─► T-012 ─┐
