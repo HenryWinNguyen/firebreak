@@ -25,6 +25,12 @@ Repo: https://github.com/HenryWinNguyen/firebreak (public).
 ## Log
 
 ### 2026-10-28: M4 eval harness
+- **T-048** (#53): spend gate. `python -m firebreak.agents.baseline [--agent NAME]` refuses (exit 2, before any client,
+  engine or adapter is built) unless `FIREBREAK_EVAL_LIVE=1`, plus `ANTHROPIC_API_KEY` when the config routes to
+  Anthropic; replay is exempt. The OpenAI-compatible key is now in the recording secret scan. No remaining path
+  reaches a paid provider without the opt-in.
+  Backlog: an invalid `FIREBREAK_LLM_MODE` prints a traceback (fails closed) instead of exit 2; tests for record mode
+  without opt-in and an invalid mode; the refusal text says "record mode" for CLI runs too.
 - **T-047** (#49, 1 rework, Opus review): hybrid model plan. `OpenAICompatLLMClient` (Ollama / any OpenAI-compatible
   server) translates the Anthropic-shaped contract internally; `RoutingLLMClient` picks the provider per model from
   `pricing.yaml` (`provider` required; unknown model = typed error, never a default to Anthropic). `baseline-local`

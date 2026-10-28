@@ -29,7 +29,7 @@
 | T-045 | Eval runner, results tables, `make eval`, REPORT.md | evals | sonnet | T-043, T-044 | merged | #43 |
 | T-046 | Record/replay hardening + evidence ids at call start | evals | sonnet | T-044 | merged | #42 |
 | T-047 | OpenAI-compatible client (local Ollama) + baseline-local (hybrid) | agents | sonnet | T-045, T-046 | merged | #49 |
-| T-048 | Baseline CLI spend gate + OpenAI key in secret scan | agents | sonnet | T-047 | in-progress | |
+| T-048 | Baseline CLI spend gate + OpenAI key in secret scan | agents | sonnet | T-047 | merged | #53 |
 | T-049 | Local baseline run S1–S7 (`baseline-local`, $0) for CP1 | evals | lead | T-047, T-016 | waiting on Henry (install Ollama) | |
 
 ```
