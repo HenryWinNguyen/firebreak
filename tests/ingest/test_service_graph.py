@@ -43,3 +43,32 @@ def test_missing_and_malformed_file(tmp_path: Path) -> None:
     bad.write_text("clusters: [unclosed")
     with pytest.raises(ServiceGraphError):
         ServiceGraph.load(bad)
+
+
+def test_unknown_service_warns_once_per_service(caplog: pytest.LogCaptureFixture) -> None:
+    g = ServiceGraph.load()
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            g.cluster_of("mystery")
+        g.cluster_of("other")
+    assert caplog.text.count("mystery") == 1
+    assert caplog.text.count("other") == 1
+
+
+def test_warn_once_set_is_capped(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import firebreak.ingest.service_graph as sg
+
+    monkeypatch.setattr(sg, "MAX_WARNED_SERVICES", 2)
+    g = ServiceGraph.load()
+    with caplog.at_level(logging.WARNING):
+        for name in ("a", "b", "c"):
+            g.cluster_of(name)
+        assert len(g._warned) == 2
+        caplog.clear()
+        g.cluster_of("c")
+        g.cluster_of("c")
+    # Past the cap: still warns every time, without growing the set.
+    assert caplog.text.count("'c'") == 2
+    assert len(g._warned) == 2

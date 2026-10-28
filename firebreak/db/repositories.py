@@ -66,7 +66,21 @@ class AlertRepository:
     async def insert_if_new(self, alert: Alert) -> bool:
         """Insert the alert. Return False if its idempotency key already exists."""
         async with self._sessions() as session, session.begin():
-            return await self.insert_if_new_in(session, alert) == alert.id
+            return (await self.insert_or_get(alert))[1]
+
+    async def insert_or_get(self, alert: Alert) -> tuple[str, bool]:
+        """Insert if the key is new. Return ``(stored_id, inserted)`` in one transaction."""
+        async with self._sessions() as session, session.begin():
+            stored_id = await self.insert_if_new_in(session, alert)
+        return stored_id, stored_id == alert.id
+
+    @staticmethod
+    async def get_status_in(session: AsyncSession, alert_id: str) -> AlertStatus | None:
+        """Stored status of an alert, or None if it does not exist."""
+        value = (
+            await session.execute(select(AlertRow.status).where(AlertRow.id == alert_id))
+        ).scalar_one_or_none()
+        return None if value is None else AlertStatus(value)
 
     @staticmethod
     async def insert_if_new_in(session: AsyncSession, alert: Alert) -> str:
@@ -172,6 +186,15 @@ class IncidentRepository:
         if row is None:
             return None
         return await cls._to_model(session, row)
+
+    @staticmethod
+    async def find_incident_for_alert_in(session: AsyncSession, alert_id: str) -> str | None:
+        """Id of the incident this alert is linked to, or None if it is unlinked."""
+        return (
+            await session.execute(
+                select(IncidentAlertRow.incident_id).where(IncidentAlertRow.alert_id == alert_id)
+            )
+        ).scalar_one_or_none()
 
     async def create(self, incident: Incident) -> Incident:
         """Insert the incident and link ``incident.alert_ids`` (alerts must already exist)."""
