@@ -31,7 +31,8 @@
 | T-047 | OpenAI-compatible client (local Ollama) + baseline-local (hybrid) | agents | sonnet | T-045, T-046 | merged | #49 |
 | T-048 | Baseline CLI spend gate + OpenAI key in secret scan | agents | sonnet | T-047 | merged | #53 |
 | T-050 | Context-overflow guard for local models | agents | sonnet | T-047 | merged | #56 |
-| T-049 | Local baseline run S1–S7 (`baseline-local`, $0) for CP1 | evals | lead | T-047, T-016, T-050 | waiting on Henry (restart `ollama serve` with 32k context) | |
+| T-051 | Live record driver + per-scenario errors | evals | sonnet | T-045, T-047, T-050 | in-progress | |
+| T-049 | Local baseline run S1–S7 (`baseline-local`, $0) for CP1 | evals | lead | T-047, T-016, T-050, T-051 | waiting (T-016 frees the stack; T-051 driver) | |
 
 ```
 T-011 ─► T-012 ─┐
