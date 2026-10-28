@@ -126,3 +126,29 @@ def test_investigation_report_rejects_bad_ranks() -> None:
     ]
     with pytest.raises(ValidationError, match="ranks"):
         InvestigationReport(**_report_kwargs(hypotheses=hs))
+
+
+def test_deterministic_ids_and_clock() -> None:
+    import asyncio
+    from datetime import UTC, datetime
+
+    import pytest
+
+    from firebreak.models.common import deterministic, new_id, utcnow
+
+    at = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
+    with deterministic("s01", at=at):
+        first = [new_id("ev"), new_id("ev"), new_id("hy")]
+        assert utcnow() == at
+
+        async def child() -> str:
+            return new_id("ev")
+
+        third_ev = asyncio.run(child())
+    with deterministic("s01", at=at):
+        again = [new_id("ev"), new_id("ev"), new_id("hy")]
+    assert first == again and first[0] != first[1]
+    assert third_ev.startswith("ev_") and third_ev not in first
+    assert new_id("ev") not in first and utcnow() != at
+    with pytest.raises(ValueError), deterministic("x", at=datetime(2026, 1, 1)):
+        pass

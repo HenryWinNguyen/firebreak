@@ -32,6 +32,7 @@ Rules:
 - `Evidence.raw_ref`: the tool gateway proposes the key (`evidence/<incident_id>/<evidence_id>`). The `EvidenceSink` may replace it, and the `Evidence` returned by `record` is authoritative.
 - `LLMRequest.fallback_model`: the only fallback the client uses (v1.3: no built-in fallback map). Unset → no fallback. Each call is priced at the model that call requested (the fallback call requests the fallback model).
 - `Finding.evidence_ids` must be non-empty. The runtime also checks they exist with `EvidenceSink.exists`.
+- `common.deterministic(seed, at=...)` (v1.4): seeds `new_id` and freezes `utcnow` for the current context. Run-path code must get ids from `new_id` and time from `utcnow()` (never `uuid4`/`datetime.now` directly), or replay breaks.
 - `InvestigationReport` (v1.3): `Hypothesis.supporting_findings`/`contradicting_findings` are refs `f<index>` into the report's own `findings`; ranks are exactly `1..n`, at most 3 hypotheses. The single-agent baseline (M3) returns it; the synthesizer (M5) will too.
 
 ## 2. Shopfloor (target system)
