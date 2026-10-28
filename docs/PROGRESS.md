@@ -3,12 +3,39 @@
 Reverse-chronological log of milestones. See [SCOPE.md](../SCOPE.md) for the
 milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 
+## ⏸ Waiting on Henry: paid live run for M3 (T-042)
+
+**Question:** OK to run the single-agent baseline against live scenarios S1–S7 with real Claude API calls?
+
+- **Needs from you:** `ANTHROPIC_API_KEY=` in `.env` (currently empty), and an OK on spend.
+- **Spend:** each investigation is hard-capped at $0.50 (`budget_usd`), so a full S1–S7 run is ≤ $3.50; ≤ 1 re-run planned (≤ $7 total).
+- **Options:** (a) go as specced (Sonnet 5.5, Haiku 5.5 fallback); (b) a cheaper smoke run first (S1 only, ≤ $0.50); (c) hold.
+- **Recommendation:** (b) then (a): one scenario confirms the wiring end to end before spending on all seven.
+- **Not blocked meanwhile:** M4 eval-harness work that runs on replay fixtures (no spend) continues.
+
 ## Current status
 
-**M1/M2/runtime wave nearly done** (T-014, T-026, T-027 open). CP0 passed 2026-10-27. Board: `docs/tasks/BOARD.md`.
+**M2 done. M3 code done; live acceptance (T-042) waits on Henry.** M1 acceptance (T-014) in rework. CP0 passed 2026-10-27. Board: `docs/tasks/BOARD.md`.
 Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
 ## Log
+
+### 2026-10-28: M2 complete, M3 baseline built
+- **T-026** (#21, 1 rework): grouper uses only repository `*_in` methods; out-of-order guard (firing replay
+  after resolved opens nothing); deterministic row-lock test that fails without `FOR UPDATE` (mutation-checked).
+- **T-027** (#23): resolved notifications update the stored alert via `mark_resolved`; stored alert id in
+  responses; 503 on DB-unreachable; engine disposal on shutdown.
+- **T-033** (#25): fallback only via `LLMRequest.fallback_model`; Retry-After; atomic fixtures; NaN cost trips budget.
+- **Contracts v1.3** (#27): `InvestigationReport` (validated `f<index>` refs, ranks 1..n) and the read-tool list
+  (CONTRACTS §3.4). `/admin/chaos` is deliberately not exposed: it would leak eval ground truth.
+- **T-034** (#28) + **T-035** (#31, 1 rework, Opus reviews): six read tools behind a GET-only, path- and
+  host-pinned transport; full JSON stored as evidence, compact view shown; whole-second windows;
+  4 MB response cap; non-finite JSON rejected; only a real backend timeout reports `timeout`.
+- **T-041** (#32, 1 rework): single-agent baseline (Sonnet 5.5, 6 read tools, 16 steps, $0.50 cap) returning an
+  `InvestigationReport`; CLI `python -m firebreak.agents.baseline <incident_id>`. Prompt checked for
+  scenario leakage (no IDs, flags, service names or `-bad` versions).
+- Backlog (M10 hardening): stacked `Content-Encoding` decompression bomb from a compromised backend;
+  `make check` doesn't type-check `tests/`.
 
 ### 2026-10-27: Runtime, ingest, chaos and persistence hardening merged
 - **T-031** (#7): Claude API client with retries, usage/cost accounting from `config/pricing.yaml`
