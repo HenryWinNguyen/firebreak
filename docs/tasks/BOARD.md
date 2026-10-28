@@ -23,12 +23,14 @@
 | T-034 | Read tools (Prometheus, Loki, deploys, service graph) | agents | sonnet | T-032 | merged | #28 |
 | T-035 | Read-tool hardening (T-034 minors) | agents | sonnet | T-034 | merged | #31 |
 | T-041 | Single-agent baseline (config, prompt, runner, CLI) | agents | sonnet | T-033, T-034 | merged | #32 |
-| T-042 | M3 acceptance: live S1–S7 (**paid, needs Henry**) | evals | sonnet | T-014, T-041, T-044, T-045 | **waiting on Henry** |  |
+| T-042 | M3 acceptance on Claude (paid, **optional**: Henry deciding) | evals | sonnet | T-014, T-041, T-044, T-045 | deferred (optional) |  |
 | T-043 | Eval scenarios S1–S7 + deterministic grader | evals | sonnet | T-041 | merged | #37 |
 | T-044 | Record/replay cassettes (tools + LLM, deterministic) | evals | **opus** (high risk) | T-041 | merged | #40 |
 | T-045 | Eval runner, results tables, `make eval`, REPORT.md | evals | sonnet | T-043, T-044 | merged | #43 |
 | T-046 | Record/replay hardening + evidence ids at call start | evals | sonnet | T-044 | merged | #42 |
 | T-047 | OpenAI-compatible client (local Ollama) + baseline-local (hybrid) | agents | sonnet | T-045, T-046 | merged | #49 |
+| T-048 | Baseline CLI spend gate + OpenAI key in secret scan | agents | sonnet | T-047 | in-progress | |
+| T-049 | Local baseline run S1–S7 (`baseline-local`, $0) for CP1 | evals | lead | T-047, T-016 | waiting on Henry (install Ollama) | |
 
 ```
 T-011 ─► T-012 ─┐

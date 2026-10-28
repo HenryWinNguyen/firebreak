@@ -3,27 +3,23 @@
 Reverse-chronological log of milestones. See [SCOPE.md](../SCOPE.md) for the
 milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 
-## ⏸ Waiting on Henry: paid live run for M3 (T-042)
+## ⏸ Waiting on Henry: install Ollama (free local baseline run for CP1)
 
-**Question:** OK to run the single-agent baseline against live scenarios S1–S7 with real Claude API calls?
+**Decision (Henry, 2026-10-28):** keep the Claude path working but **don't spend for now**. The paid Claude run
+(T-042) is **optional/deferred**; nothing else is blocked on it. CP1 uses same-model scores from the free local model.
 
-- **Needs from you:** `ANTHROPIC_API_KEY=` in `.env` (currently empty), and an OK on spend.
-- **Spend:** each investigation is hard-capped at $0.50 (`budget_usd`), so a full S1–S7 run is ≤ $3.50; ≤ 1 re-run planned (≤ $7 total).
-- **Options:** (a) go as specced (Sonnet 5.5, Haiku 5.5 fallback); (b) a cheaper smoke run first (S1 only, ≤ $0.50); (c) hold.
-- **Recommendation:** (b) then (a): one scenario confirms the wiring end to end before spending on all seven.
-- **Timing:** T-044/T-045/T-046 (record/replay + runner) are merged, so recordings made now replay for $0. Record with `python -m firebreak.evals run --mode record` (needs `FIREBREAK_EVAL_LIVE=1`); it reads the live incident read-only and writes only the recording dir and the `firebreak_eval` DB.
-- **Decision (Henry, 2026-10-28): hybrid.** Iterate on a free local model (T-047: OpenAI-compatible client +
-  `baseline-local`); one recorded Claude run for the CP1 headline numbers. Billing is prepaid Console credits
-  (separate from the Claude subscription); a $5 top-up with auto-reload off covers it. Still needs: the key in
-  `.env` and a go-ahead at run time. For local runs Henry installs Ollama (`brew install ollama`,
-  `ollama pull qwen3:8b`).
-- **Free local runs are ready (T-047 merged).** Henry: `brew install ollama`, `ollama serve`, `ollama pull qwen3:8b`,
-  then the lead runs `baseline-local` on S1–S7 for $0.
-- **Not blocked meanwhile:** M4 eval-harness work that runs on replay fixtures (no spend) continues.
+- **Needs from you:** `brew install ollama`, then `ollama serve` (separate terminal, keeps running), then
+  `ollama pull qwen3:8b` (~5 GB). Tell the lead when done.
+- **Then the lead runs (T-049, $0):** the `FIREBREAK_OLLAMA=1` integration test once, then
+  `python -m firebreak.evals run --mode record --agent baseline-local` on S1–S7, then `make eval` → REPORT.md.
+- **If you decide to pay later:** $5 prepaid Console credits (auto-reload off), key in `.env`, and a go-ahead at
+  run time. It adds a Claude column to the report; nothing is rebuilt.
+- **Optional free upgrade:** a Groq free-tier account would allow a larger hosted open model ($0, ~1,000 req/day).
+- **Not blocked meanwhile:** all other work continues on fakes and replays at $0.
 
 ## Current status
 
-**M2 done. M3 code done. M4 eval harness done (scenarios, grader, record/replay, runner); recordings wait on T-042 (Henry). T-016 (live S5–S7) in progress.** M1 done. CP0 passed 2026-10-27. Board: `docs/tasks/BOARD.md`.
+**M2 done. M3 code done. M4 eval harness done (scenarios, grader, record/replay, runner); recordings wait on the local baseline run (T-049; Henry installs Ollama). Paid Claude run optional. T-016 (live S5–S7) in progress.** M1 done. CP0 passed 2026-10-27. Board: `docs/tasks/BOARD.md`.
 Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
 ## Log
