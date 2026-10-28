@@ -12,6 +12,11 @@ milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 - **Options:** (a) go as specced (Sonnet 5.5, Haiku 5.5 fallback); (b) a cheaper smoke run first (S1 only, ≤ $0.50); (c) hold.
 - **Recommendation:** (b) then (a): one scenario confirms the wiring end to end before spending on all seven.
 - **Timing:** T-044/T-045/T-046 (record/replay + runner) are merged, so recordings made now replay for $0. Record with `python -m firebreak.evals run --mode record` (needs `FIREBREAK_EVAL_LIVE=1`); it reads the live incident read-only and writes only the recording dir and the `firebreak_eval` DB.
+- **Decision (Henry, 2026-10-28): hybrid.** Iterate on a free local model (T-047: OpenAI-compatible client +
+  `baseline-local`); one recorded Claude run for the CP1 headline numbers. Billing is prepaid Console credits
+  (separate from the Claude subscription); a $5 top-up with auto-reload off covers it. Still needs: the key in
+  `.env` and a go-ahead at run time. For local runs Henry installs Ollama (`brew install ollama`,
+  `ollama pull qwen3:8b`).
 - **Not blocked meanwhile:** M4 eval-harness work that runs on replay fixtures (no spend) continues.
 
 ## Current status
