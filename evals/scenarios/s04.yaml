@@ -1,0 +1,18 @@
+id: S4
+title: "Downstream dependency down: inventory unavailable"
+setup:
+  # SCOPE says 'stop the inventory container'; CONTRACTS 2.3 uses the inventory.unavailable
+  # flag (all routes 503), which is what is applied here.
+  chaos: {inventory.unavailable: true}
+load: {rps: 50, duration_s: 300, cart_size: 1}
+expect:
+  # ServiceDown cannot fire with the flag implementation (health and metrics stay up).
+  alerts:  # any-of
+    - {alertname: HighErrorRate, service: orders}
+    - {alertname: HighErrorRate, service: gateway}
+    - {alertname: HighErrorRate, service: inventory}
+  root_cause_category: dependency_failure
+  must_cite_kinds: [log_lines, metric_series]
+  accepted_actions:
+    - {action: restart, target: inventory}
+teardown: {reset_chaos: true}
