@@ -1,0 +1,16 @@
+id: S1
+title: "Bad deploy: orders returns 500 on 10% of requests"
+setup:
+  # No explicit orders.error_rate flag: the "-bad" deploy turns the bug path on itself.
+  # prior_deploy gives recent_deploys a version to roll back to.
+  prior_deploy: {service: orders, version: v1.0.0}
+  deploy: {service: orders, version: v2.0.0-bad}
+load: {rps: 50, duration_s: 300, cart_size: 1}
+expect:
+  alerts:  # any-of
+    - {alertname: HighErrorRate, service: orders}
+  root_cause_category: bad_deploy
+  must_cite_kinds: [deploy, metric_series]
+  accepted_actions:
+    - {action: rollback, target: orders}
+teardown: {reset_chaos: true}

@@ -1,0 +1,15 @@
+id: S2
+title: "DB connection pool exhaustion under load"
+setup:
+  chaos: {orders.db_pool_size: 2}
+load: {rps: 150, duration_s: 300, cart_size: 1}
+expect:
+  alerts:  # any-of
+    - {alertname: DBPoolSaturated, service: orders}
+    - {alertname: HighLatencyP95, service: orders}
+  root_cause_category: resource_exhaustion
+  must_cite_kinds: [metric_series]
+  accepted_actions:  # SCOPE: raise pool size or scale replicas
+    - {action: scale, target: orders}
+    - {action: toggle_flag, target: orders}
+teardown: {reset_chaos: true}
