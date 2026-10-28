@@ -21,7 +21,7 @@ from firebreak.db.tables import (
     IncidentAlertRow,
     IncidentRow,
 )
-from firebreak.models.alert import Alert, AlertStatus
+from firebreak.models.alert import Alert, AlertSource, AlertStatus
 from firebreak.models.common import Severity, utcnow
 from firebreak.models.evidence import Evidence, EvidenceKind
 from firebreak.models.incident import TERMINAL_STATES, Incident, IncidentState
@@ -59,6 +59,22 @@ def _require_aware(**values: datetime | None) -> None:
             raise ValueError(f"{name} must be a timezone-aware datetime")
 
 
+def _alert_from_row(r: AlertRow) -> Alert:
+    return Alert(
+        id=r.id,
+        source=AlertSource(r.source),
+        fingerprint=r.fingerprint,
+        alertname=r.alertname,
+        service=r.service,
+        severity=Severity(r.severity),
+        status=AlertStatus(r.status),
+        summary=r.summary,
+        labels=dict(r.labels),
+        started_at=r.started_at,
+        ended_at=r.ended_at,
+    )
+
+
 class AlertRepository:
     def __init__(self, sessions: SessionFactory) -> None:
         self._sessions = sessions
@@ -66,7 +82,21 @@ class AlertRepository:
     async def insert_if_new(self, alert: Alert) -> bool:
         """Insert the alert. Return False if its idempotency key already exists."""
         async with self._sessions() as session, session.begin():
-            return await self.insert_if_new_in(session, alert) == alert.id
+            return (await self.insert_or_get(alert))[1]
+
+    async def insert_or_get(self, alert: Alert) -> tuple[str, bool]:
+        """Insert if the key is new. Return ``(stored_id, inserted)`` in one transaction."""
+        async with self._sessions() as session, session.begin():
+            stored_id = await self.insert_if_new_in(session, alert)
+        return stored_id, stored_id == alert.id
+
+    @staticmethod
+    async def get_status_in(session: AsyncSession, alert_id: str) -> AlertStatus | None:
+        """Stored status of an alert, or None if it does not exist."""
+        value = (
+            await session.execute(select(AlertRow.status).where(AlertRow.id == alert_id))
+        ).scalar_one_or_none()
+        return None if value is None else AlertStatus(value)
 
     @staticmethod
     async def insert_if_new_in(session: AsyncSession, alert: Alert) -> str:
@@ -172,6 +202,15 @@ class IncidentRepository:
         if row is None:
             return None
         return await cls._to_model(session, row)
+
+    @staticmethod
+    async def find_incident_for_alert_in(session: AsyncSession, alert_id: str) -> str | None:
+        """Id of the incident this alert is linked to, or None if it is unlinked."""
+        return (
+            await session.execute(
+                select(IncidentAlertRow.incident_id).where(IncidentAlertRow.alert_id == alert_id)
+            )
+        ).scalar_one_or_none()
 
     async def create(self, incident: Incident) -> Incident:
         """Insert the incident and link ``incident.alert_ids`` (alerts must already exist)."""
@@ -297,6 +336,28 @@ class IncidentRepository:
             if row is None:
                 return None
             return await self._to_model(session, row)
+
+    async def list_alerts(self, incident_id: str) -> list[Alert]:
+        """The alerts attached to an incident, ordered by ``started_at`` then ``id``.
+
+        Raises ``IncidentNotFoundError`` if the incident does not exist.
+        """
+        async with self._sessions() as session:
+            if await session.get(IncidentRow, incident_id) is None:
+                raise IncidentNotFoundError(incident_id)
+            rows = (
+                (
+                    await session.execute(
+                        select(AlertRow)
+                        .join(IncidentAlertRow, IncidentAlertRow.alert_id == AlertRow.id)
+                        .where(IncidentAlertRow.incident_id == incident_id)
+                        .order_by(AlertRow.started_at, AlertRow.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return [_alert_from_row(r) for r in rows]
 
     @staticmethod
     async def _to_model(session: AsyncSession, row: IncidentRow) -> Incident:

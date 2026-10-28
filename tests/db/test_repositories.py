@@ -350,3 +350,46 @@ async def test_no_schema_drift(engine: AsyncEngine) -> None:
 
     async with engine.connect() as conn:
         assert await conn.run_sync(_diff) == []
+
+
+async def test_insert_or_get_returns_stored_id_and_flag(sessions: Sessions) -> None:
+    repo = AlertRepository(sessions)
+    a = make_alert()
+    assert await repo.insert_or_get(a) == (a.id, True)
+    dup = make_alert(started_at=a.started_at)
+    assert await repo.insert_or_get(dup) == (a.id, False)
+
+
+async def test_find_incident_for_alert_in(sessions: Sessions) -> None:
+    alerts = AlertRepository(sessions)
+    incidents = IncidentRepository(sessions)
+    linked, unlinked = make_alert("fp-l"), make_alert("fp-u")
+    await alerts.insert_if_new(linked)
+    await alerts.insert_if_new(unlinked)
+    inc = await incidents.create(make_incident(alert_ids=[linked.id]))
+    async with sessions() as session:
+        assert await IncidentRepository.find_incident_for_alert_in(session, linked.id) == inc.id
+        assert await IncidentRepository.find_incident_for_alert_in(session, unlinked.id) is None
+        assert await IncidentRepository.find_incident_for_alert_in(session, "al_nope") is None
+
+
+async def test_list_alerts_ordered_and_scoped(sessions: Sessions) -> None:
+    alerts = AlertRepository(sessions)
+    incidents = IncidentRepository(sessions)
+    t0 = utcnow().replace(microsecond=0)
+    late = make_alert("late", "orders", started_at=t0 + timedelta(seconds=5), summary="later")
+    early = make_alert("early", "inventory", started_at=t0, labels={"a": "b"}, ended_at=t0)
+    other = make_alert("other", "gateway", started_at=t0)
+    for a in (late, early, other):
+        await alerts.insert_if_new(a)
+    inc = await incidents.create(make_incident(alert_ids=[late.id]))
+    await incidents.attach_alert(inc.id, early.id, "inventory")
+    await incidents.create(make_incident(alert_ids=[other.id]))
+
+    got = await incidents.list_alerts(inc.id)
+    assert got == [early, late]  # by started_at; the other incident's alert is excluded
+
+
+async def test_list_alerts_unknown_incident(sessions: Sessions) -> None:
+    with pytest.raises(IncidentNotFoundError):
+        await IncidentRepository(sessions).list_alerts("inc_missing")

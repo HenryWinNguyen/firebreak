@@ -1,0 +1,9 @@
+# Example agent used by the runtime tests (T-032). Not a production specialist.
+name: echo
+model: claude-haiku-4-5
+system_prompt: echo.md
+tools: [echo]
+max_steps: 4
+max_output_tokens: 1024
+budget_usd: 0.05
+output_schema: SpecialistReport

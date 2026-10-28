@@ -1,74 +1,20 @@
 import asyncio
-import os
-from collections.abc import AsyncIterator, Iterator
+import logging
 from datetime import timedelta
-from pathlib import Path
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import text
-from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-)
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from firebreak.db.engine import make_session_factory
-from firebreak.db.repositories import IncidentRepository
+import firebreak.ingest.grouping as grouping_mod
+from firebreak.db.repositories import AlertRepository, IncidentRepository
 from firebreak.ingest.grouping import PostgresIncidentGrouper
 from firebreak.ingest.service_graph import ServiceGraph
-from firebreak.models.alert import Alert, AlertSource
+from firebreak.models.alert import Alert, AlertSource, AlertStatus
 from firebreak.models.common import Severity, utcnow
+from firebreak.models.incident import Incident, IncidentState
 
 pytestmark = pytest.mark.db
-
-DB_URL = os.environ.get("FIREBREAK_TEST_DATABASE_URL")
-ALEMBIC_INI = Path(__file__).resolve().parents[2] / "firebreak" / "db" / "alembic.ini"
-MIGRATIONS = ALEMBIC_INI.parent / "migrations"
-
-
-def _upgrade(sync_conn: Connection) -> None:
-    cfg = Config(str(ALEMBIC_INI))
-    cfg.set_main_option("script_location", str(MIGRATIONS))
-    cfg.attributes["connection"] = sync_conn
-    command.upgrade(cfg, "head")
-
-
-async def _migrate(url: str) -> None:
-    engine = create_async_engine(url, poolclass=NullPool)
-    try:
-        async with engine.begin() as conn:
-            await conn.execute(text("DROP SCHEMA public CASCADE"))
-            await conn.execute(text("CREATE SCHEMA public"))
-            await conn.run_sync(_upgrade)
-    finally:
-        await engine.dispose()
-
-
-@pytest.fixture(scope="module")
-def migrated_url() -> Iterator[str]:
-    if not DB_URL:
-        pytest.skip("FIREBREAK_TEST_DATABASE_URL is not set")
-    asyncio.run(_migrate(DB_URL))
-    yield DB_URL
-
-
-@pytest.fixture
-async def engine(migrated_url: str) -> AsyncIterator[AsyncEngine]:
-    eng = create_async_engine(migrated_url, poolclass=NullPool)
-    async with eng.begin() as conn:
-        await conn.execute(text("TRUNCATE alerts, incidents, incident_alerts CASCADE"))
-    yield eng
-    await eng.dispose()
-
-
-@pytest.fixture
-def sessions(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-    return make_session_factory(engine)
 
 
 def make_alert(service: str, severity: Severity = Severity.WARNING, n: int = 0) -> Alert:
@@ -184,6 +130,8 @@ async def test_concurrent_alerts_one_incident(
     async with sessions() as s:
         count = (await s.execute(text("SELECT count(*) FROM incidents"))).scalar_one()
     assert count == 1
+    inc = await IncidentRepository(sessions).get(decisions[0].incident_id or "")
+    assert inc is not None and set(inc.services) == set(services)
 
 
 async def test_s10_storm_15_alerts_one_incident(
@@ -193,7 +141,164 @@ async def test_s10_storm_15_alerts_one_incident(
     services = ["gateway", "orders", "inventory"]
     decisions = [await g.assign(make_alert(services[i % 3], n=i)) for i in range(15)]
     assert len({d.incident_id for d in decisions}) == 1
-    inc = await IncidentRepository(sessions).get(decisions[0].incident_id)
+    inc = await IncidentRepository(sessions).get(decisions[0].incident_id or "")
     assert inc is not None
     assert len(inc.alert_ids) == 15
     assert set(inc.services) == set(services)
+
+
+@pytest.mark.parametrize(
+    ("offset", "joins"), [(timedelta(0), False), (timedelta(microseconds=-1), True)]
+)
+async def test_window_boundary_is_exclusive(
+    sessions: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    offset: timedelta,
+    joins: bool,
+) -> None:
+    g = grouper(sessions)
+    d1 = await g.assign(make_alert("gateway"))
+    inc = await IncidentRepository(sessions).get(d1.incident_id or "")
+    assert inc is not None
+    at = inc.window_closes_at + offset
+    monkeypatch.setattr(grouping_mod, "utcnow", lambda: at)
+    d2 = await g.assign(make_alert("orders"))
+    assert (d2.incident_id == d1.incident_id) is joins
+    assert d2.created is (not joins)
+
+
+async def test_terminal_incident_never_joined(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    now = utcnow()
+    terminal = await IncidentRepository(sessions).create(
+        Incident(
+            state=IncidentState.RESOLVED,
+            severity=Severity.WARNING,
+            cluster="shopfloor",
+            services=["gateway"],
+            alert_ids=[],
+            opened_at=now,
+            window_closes_at=now + timedelta(minutes=5),
+        )
+    )
+    d = await grouper(sessions).assign(make_alert("gateway"))
+    assert d.created and d.incident_id != terminal.id
+
+
+async def test_same_alert_twice_concurrently(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    g = grouper(sessions)
+    a = make_alert("gateway")
+    replay = a.model_copy(update={"id": "al_replay"})
+    d1, d2 = await asyncio.gather(g.assign(a), g.assign(replay))
+    assert d1.incident_id == d2.incident_id
+    assert sorted([d1.duplicate, d2.duplicate]) == [False, True]
+    assert sum(d.created for d in (d1, d2)) == 1
+    inc = await IncidentRepository(sessions).get(d1.incident_id or "")
+    assert inc is not None and len(inc.alert_ids) == 1
+    async with sessions() as s:
+        assert (await s.execute(text("SELECT count(*) FROM alerts"))).scalar_one() == 1
+        assert (await s.execute(text("SELECT count(*) FROM incident_alerts"))).scalar_one() == 1
+
+
+async def test_pre_inserted_unlinked_alert_gets_grouped(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    a = make_alert("gateway")
+    assert await AlertRepository(sessions).insert_if_new(a)
+    g = grouper(sessions)
+    d = await g.assign(a)
+    assert d.created and not d.duplicate
+    inc = await IncidentRepository(sessions).get(d.incident_id or "")
+    assert inc is not None and inc.alert_ids == [a.id]
+    # A replay under a fresh id resolves to the stored row.
+    d2 = await g.assign(a.model_copy(update={"id": "al_other"}))
+    assert d2.duplicate and d2.incident_id == d.incident_id
+
+
+async def test_resolved_alert_without_open_incident_opens_nothing(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    a = make_alert("gateway").model_copy(
+        update={"status": AlertStatus.RESOLVED, "ended_at": utcnow()}
+    )
+    g = grouper(sessions)
+    d = await g.assign(a)
+    assert d.incident_id is None and not d.created and not d.duplicate
+    async with sessions() as s:
+        assert (await s.execute(text("SELECT count(*) FROM incidents"))).scalar_one() == 0
+        assert (await s.execute(text("SELECT count(*) FROM alerts"))).scalar_one() == 1
+    d2 = await g.assign(a.model_copy(update={"id": "al_replay"}))
+    assert d2.duplicate and d2.incident_id is None
+
+
+async def test_resolved_alert_attaches_without_severity_or_window_effects(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    g = grouper(sessions)
+    d1 = await g.assign(make_alert("gateway", Severity.WARNING))
+    repo = IncidentRepository(sessions)
+    before = await repo.get(d1.incident_id or "")
+    assert before is not None
+    resolved = make_alert("orders", Severity.CRITICAL, n=1).model_copy(
+        update={"status": AlertStatus.RESOLVED, "ended_at": utcnow()}
+    )
+    d2 = await g.assign(resolved)
+    assert d2.incident_id == d1.incident_id and not d2.created and not d2.duplicate
+    after = await repo.get(d1.incident_id or "")
+    assert after is not None
+    assert after.severity is Severity.WARNING
+    assert after.window_closes_at == before.window_closes_at
+    assert resolved.id in after.alert_ids
+
+
+async def test_concurrent_services_not_lost(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """Another transaction holds the incident row lock and has attached a service but not
+    committed. The grouper must wait on the row (FOR UPDATE) and then see that service."""
+    g = grouper(sessions)
+    d0 = await g.assign(make_alert("gateway"))
+    incident_id = d0.incident_id or ""
+    extra = make_alert("redis", n=99)
+    assert await AlertRepository(sessions).insert_if_new(extra)
+    now = utcnow()
+    async with sessions() as holder, holder.begin():
+        locked = await IncidentRepository.find_open_for_cluster_in(
+            holder, "shopfloor", now, for_update=True
+        )
+        assert locked is not None and locked.id == incident_id
+        await IncidentRepository.attach_alert_in(holder, incident_id, extra.id, "redis")
+        task = asyncio.create_task(g.assign(make_alert("orders", n=1)))
+        await asyncio.sleep(0.5)
+        assert not task.done()  # blocked on the row lock
+    d = await task
+    assert d.incident_id == incident_id and not d.created
+    inc = await IncidentRepository(sessions).get(incident_id)
+    assert inc is not None
+    assert set(inc.services) == {"gateway", "redis", "orders"}
+
+
+async def test_firing_replay_after_resolved_is_not_grouped(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    g = grouper(sessions)
+    firing = make_alert("gateway")
+    await AlertRepository(sessions).insert_if_new(firing)
+    await AlertRepository(sessions).mark_resolved(firing.idempotency_key, utcnow())
+    d = await g.assign(firing.model_copy(update={"id": "al_replay"}))
+    assert d.incident_id is None and not d.created and d.duplicate
+    async with sessions() as s:
+        assert (await s.execute(text("SELECT count(*) FROM incidents"))).scalar_one() == 0
+
+
+async def test_unknown_service_warns_once_across_alerts(
+    sessions: async_sessionmaker[AsyncSession], caplog: pytest.LogCaptureFixture
+) -> None:
+    g = grouper(sessions)
+    with caplog.at_level(logging.WARNING, logger="firebreak.ingest.service_graph"):
+        for n in range(3):
+            await g.assign(make_alert("mystery", n=n))
+    assert caplog.text.count("mystery") == 1

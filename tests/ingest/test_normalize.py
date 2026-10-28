@@ -178,3 +178,51 @@ def test_description_fallback_summary() -> None:
     )
     [a] = normalize_alertmanager(_hook(am))
     assert a.summary == "long text"
+
+
+def test_empty_fingerprint_is_a_problem() -> None:
+    with pytest.raises(NormalizationError, match="fingerprint"):
+        normalize_alertmanager(_hook(_am({"alertname": "A", "service": "s"}, fp="")))
+
+
+def test_oversized_fingerprint_rejected() -> None:
+    with pytest.raises(NormalizationError, match="fingerprint"):
+        normalize_alertmanager(_hook(_am({"alertname": "A", "service": "s"}, fp="f" * 257)))
+
+
+@pytest.mark.parametrize("label", ["alertname", "service"])
+def test_alertmanager_256_cap_on_alertname_and_service(label: str) -> None:
+    labels = {"alertname": "A", "service": "s"}
+    normalize_alertmanager(_hook(_am({**labels, label: "x" * 256})))
+    with pytest.raises(NormalizationError, match="256"):
+        normalize_alertmanager(_hook(_am({**labels, label: "x" * 257})))
+
+
+def test_oversized_annotations_rejected() -> None:
+    am = AlertmanagerAlert(
+        status=AlertStatus.FIRING,
+        labels={"alertname": "A", "service": "s"},
+        annotations={"summary": "y" * 2001},
+        startsAt=T0,
+        fingerprint="f",
+    )
+    with pytest.raises(NormalizationError, match="annotations"):
+        normalize_alertmanager(_hook(am))
+
+
+@pytest.mark.parametrize("field", ["alertname", "service", "fingerprint"])
+def test_generic_256_cap(field: str) -> None:
+    base = {"alertname": "A", "service": "s", "fingerprint": "f", "started_at": T0}
+    GenericWebhook(**{**base, field: "x" * 256})
+    with pytest.raises(ValidationError):
+        GenericWebhook(**{**base, field: "x" * 257})
+
+
+def test_generic_oversized_summary_and_labels_rejected() -> None:
+    base = {"alertname": "A", "service": "s", "started_at": T0}
+    with pytest.raises(ValidationError):
+        GenericWebhook(**base, summary="y" * 2001)
+    with pytest.raises(ValidationError):
+        GenericWebhook(**base, labels={"k": "v" * 2001})
+    with pytest.raises(ValidationError):
+        GenericWebhook(**base, labels={f"k{i}": "v" for i in range(65)})
