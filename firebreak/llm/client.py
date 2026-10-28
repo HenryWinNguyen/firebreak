@@ -4,7 +4,7 @@ import asyncio
 import logging
 import math
 import random
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, cast
@@ -12,11 +12,17 @@ from typing import Any, cast
 import anthropic
 
 from firebreak.llm.errors import LLMError, LLMRetriesExhausted
-from firebreak.llm.fixtures import FixtureStore
+from firebreak.llm.fixtures import (
+    FixtureStore,
+    StaleRecordingError,
+    first_difference,
+    fixture_key,
+)
 from firebreak.llm.pricing import PricingTable
 from firebreak.llm.ratelimit import TokenBucket
 from firebreak.llm.replay import RecordingLLMClient, ReplayLLMClient
 from firebreak.llm.settings import LLMMode, LLMSettings
+from firebreak.models.common import utcnow
 from firebreak.models.llm import LLMClient, LLMRequest, LLMResponse, Usage
 
 log = logging.getLogger(__name__)
@@ -95,7 +101,7 @@ class AnthropicLLMClient:
         limiter: TokenBucket | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         rng: random.Random | None = None,
-        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        clock: Callable[[], datetime] = utcnow,
     ) -> None:
         self._settings = settings or LLMSettings()
         # The SDK's own retries are disabled so this class is the single retry policy.
@@ -225,12 +231,87 @@ class AnthropicLLMClient:
         )
 
 
-def build_llm_client(settings: LLMSettings | None = None) -> LLMClient:
-    """Factory honoring FIREBREAK_LLM_MODE=live|record|replay."""
+class StrictReplayLLMClient(ReplayLLMClient):
+    """Replay mode for evals: recorded responses only, and a miss is a ``StaleRecordingError``.
+
+    It holds no live client and no transport, so a miss can never fall through to a real
+    call. The error names the scenario, the 1-based LLM step and (when the recorded call
+    order is known) the first part of the request that differs from the recording.
+    ``check`` runs before every step; the cassette uses it to surface a stale *tool*
+    recording, which the gateway would otherwise turn into an ordinary tool error.
+    """
+
+    def __init__(
+        self,
+        store: FixtureStore,
+        *,
+        scenario: str,
+        recorded_keys: Sequence[str] = (),
+        check: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__(store)
+        self.scenario = scenario
+        self._recorded_keys = list(recorded_keys)
+        self._check = check
+        self.steps = 0
+
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        self.steps += 1
+        step = self.steps
+        if self._check is not None:
+            self._check()
+        key = fixture_key(request)
+        path = self._store.path_for(key)
+        if not path.exists():
+            raise StaleRecordingError(
+                scenario=self.scenario,
+                step=f"llm step {step}",
+                detail=self._what_changed(step, request),
+                key=key,
+                path=str(path),
+            )
+        return self._store.load(request)
+
+    def _what_changed(self, step: int, request: LLMRequest) -> str:
+        if not self._recorded_keys:
+            return "no recorded response for this request"
+        if step > len(self._recorded_keys):
+            return f"the recording has only {len(self._recorded_keys)} LLM steps"
+        recorded = self._store.load_request(self._recorded_keys[step - 1])
+        if recorded is None:
+            return f"recorded fixture {self._recorded_keys[step - 1]} is missing"
+        return first_difference(recorded, request)
+
+
+class KeyLoggingRecorder(RecordingLLMClient):
+    """Record mode for evals: like ``RecordingLLMClient``, plus the fixture keys in call order."""
+
+    def __init__(self, inner: LLMClient, store: FixtureStore) -> None:
+        super().__init__(inner, store)
+        self.keys: list[str] = []
+        self.requests: list[LLMRequest] = []
+        self.responses: list[LLMResponse] = []
+
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        response = await self._inner.complete(request)
+        self.keys.append(self._store.save(request, response))
+        self.requests.append(request)
+        self.responses.append(response)
+        return response
+
+
+def build_llm_client(
+    settings: LLMSettings | None = None, *, scenario: str | None = None
+) -> LLMClient:
+    """Factory honoring FIREBREAK_LLM_MODE=live|record|replay.
+
+    Replay never builds a live client: a missing fixture raises ``StaleRecordingError``
+    (named after ``scenario``, default the fixture directory's name).
+    """
     settings = settings or LLMSettings()
     store = FixtureStore(settings.fixture_dir)
     if settings.mode is LLMMode.REPLAY:
-        return ReplayLLMClient(store)
+        return StrictReplayLLMClient(store, scenario=scenario or settings.fixture_dir.name)
     live = AnthropicLLMClient(settings)
     if settings.mode is LLMMode.RECORD:
         return RecordingLLMClient(live, store)
