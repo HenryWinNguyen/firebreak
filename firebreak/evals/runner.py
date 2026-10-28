@@ -17,11 +17,13 @@ one ``EvalRunError`` naming them, with nothing stored.
 import logging
 import os
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import yaml
 from alembic import command
 from alembic.config import Config
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -32,8 +34,10 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
+import firebreak.agents.baseline as baseline_module
 import firebreak.db
 from firebreak.agents.baseline import BaselineResult, investigate
+from firebreak.agents.config import CONFIGS_DIR
 from firebreak.config import Settings
 from firebreak.db.repositories import (
     AlertRepository,
@@ -56,6 +60,10 @@ from firebreak.evals.cassette import (
 )
 from firebreak.evals.grader import grade
 from firebreak.evals.scenario import Scenario
+from firebreak.llm.errors import LLMError
+from firebreak.llm.pricing import PricingTable
+from firebreak.llm.settings import LLMSettings
+from firebreak.models.agents import AgentConfig
 from firebreak.models.alert import Alert
 from firebreak.models.common import new_id, utcnow
 from firebreak.models.evidence import EvidenceKind
@@ -326,13 +334,14 @@ async def replay_scenario(
     with replay_run(directory) as rp:
         await _install_incident(repo, sessions, info)
         registry = build_read_registry(tools_settings, rp.adapters)
-        result = await investigate(
-            info.incident.id,
-            llm=rp.llm,
-            sessions=sessions,
-            tools_settings=tools_settings,
-            registry=registry,
-        )
+        with _agent_config(agent):
+            result = await investigate(
+                info.incident.id,
+                llm=rp.llm,
+                sessions=sessions,
+                tools_settings=tools_settings,
+                registry=registry,
+            )
         prompt_sha = rp.meta.prompt_sha256
     kinds = await repo.evidence_kinds(info.incident.id)
     # Replay speed says nothing about the agent; report the recorded live latency.
@@ -341,13 +350,64 @@ async def replay_scenario(
     )
 
 
-def require_live_env(env: Mapping[str, str] | None = None) -> None:
-    """Record mode spends money: refuse unless FIREBREAK_EVAL_LIVE=1 and an API key are set."""
+def agent_config_path(agent: str) -> Path:
+    """The config file of an eval agent (``firebreak/agents/configs/<agent>.yaml``)."""
+    path = CONFIGS_DIR / f"{agent}.yaml"
+    if "/" in agent or "\\" in agent or agent.startswith(".") or not path.is_file():
+        known = sorted(p.stem for p in CONFIGS_DIR.glob("*.yaml"))
+        raise EvalRunError(f"unknown agent {agent!r}; known agents: {known}")
+    return path
+
+
+def agent_models(agent: str) -> list[str]:
+    """The agent's model and fallback model, read from its config."""
+    path = agent_config_path(agent)
+    try:
+        cfg = AgentConfig.model_validate(yaml.safe_load(path.read_text()))
+    except (OSError, yaml.YAMLError, ValidationError) as exc:
+        raise EvalRunError(f"cannot read agent config {path}: {exc}") from exc
+    return [m for m in (cfg.model, cfg.fallback_model) if m]
+
+
+def agent_providers(agent: str) -> set[str]:
+    """Providers the agent's model and fallback route to (from ``pricing.yaml``)."""
+    pricing = PricingTable.load(LLMSettings().pricing_path)
+    try:
+        return {pricing.provider_for(m) for m in agent_models(agent)}
+    except LLMError as exc:  # UnknownModelError: a model with no provider is never run
+        raise EvalRunError(f"agent {agent!r}: {exc}") from exc
+
+
+@contextmanager
+def _agent_config(agent: str) -> Iterator[None]:
+    """Point ``investigate`` at ``agent``'s config for the duration of one run.
+
+    ``investigate`` (``agents/baseline.py``, not owned by T-047) reads a module-level
+    ``BASELINE_CONFIG``. Until it takes an agent argument, swap that path here and always
+    restore it. Eval scenarios run one at a time, so there is no concurrent user.
+    """
+    path = agent_config_path(agent)
+    previous = baseline_module.BASELINE_CONFIG
+    baseline_module.BASELINE_CONFIG = path
+    try:
+        yield
+    finally:
+        baseline_module.BASELINE_CONFIG = previous
+
+
+def require_live_env(env: Mapping[str, str] | None = None, *, agent: str = "baseline") -> None:
+    """Record mode: refuse unless FIREBREAK_EVAL_LIVE=1 is set.
+
+    ``ANTHROPIC_API_KEY`` is required only if the agent's model or fallback routes to
+    ``anthropic``; an all-local agent (``baseline-local``) needs no key.
+    """
     env = os.environ if env is None else env
     if env.get(LIVE_FLAG) != "1":
-        raise LiveModeRefusedError(f"record mode spends money; set {LIVE_FLAG}=1 to allow it")
-    if not env.get(API_KEY_VAR):
-        raise LiveModeRefusedError(f"record mode needs {API_KEY_VAR} to be set")
+        raise LiveModeRefusedError(
+            f"record mode spends time or money; set {LIVE_FLAG}=1 to allow it"
+        )
+    if "anthropic" in agent_providers(agent) and not env.get(API_KEY_VAR):
+        raise LiveModeRefusedError(f"record mode for agent {agent!r} needs {API_KEY_VAR} to be set")
 
 
 async def record_scenario(
@@ -369,7 +429,7 @@ async def record_scenario(
     The incident is read from ``live_sessions`` (read-only: ``get`` and ``list_alerts``); a copy
     is installed in the eval database (``sessions``), which is the only database written.
     """
-    require_live_env(env)
+    require_live_env(env, agent=agent)
     await require_eval_session(sessions)
     if await _identity(sessions) == await _identity(live_sessions):
         raise EvalRunError(
@@ -387,15 +447,18 @@ async def record_scenario(
         sessions,
         RecordedRunInfo(incident=incident, alerts=alerts, latency_s=0.0),
     )
-    with record_run(
-        directory,
-        agent=agent,
-        scenario=key,
-        at=utcnow(),
-        adapters=adapters,
-        llm=llm,
-        overwrite=overwrite,
-    ) as rec:
+    with (
+        record_run(
+            directory,
+            agent=agent,
+            scenario=key,
+            at=utcnow(),
+            adapters=adapters,
+            llm=llm,
+            overwrite=overwrite,
+        ) as rec,
+        _agent_config(agent),
+    ):
         result = await investigate(
             incident_id,
             llm=rec.llm,

@@ -25,6 +25,7 @@ from firebreak.db.repositories import (
     IncidentRepository,
     SessionFactory,
 )
+from firebreak.evals import runner
 from firebreak.evals.__main__ import main
 from firebreak.evals.cassette import recording_dir
 from firebreak.evals.report import NoRunsError, render_report
@@ -584,3 +585,67 @@ async def test_record_reads_live_and_writes_only_recording_and_eval_db(
     assert await IncidentRepository(sessions).get(incident_id) is not None
     async with engine.connect() as conn:
         assert (await conn.execute(text(n + "evidence"))).scalar_one() == 6
+
+
+def test_require_live_env_key_only_for_anthropic_agents() -> None:
+    local = {"FIREBREAK_EVAL_LIVE": "1"}
+    with pytest.raises(LiveModeRefusedError, match="FIREBREAK_EVAL_LIVE"):
+        require_live_env({}, agent="baseline-local")  # the flag is always required
+    require_live_env(local, agent="baseline-local")  # all-local: no Anthropic key needed
+    require_live_env({**local, "ANTHROPIC_API_KEY": "k"}, agent="baseline-local")
+    with pytest.raises(LiveModeRefusedError, match="ANTHROPIC_API_KEY"):
+        require_live_env(local, agent="baseline")
+    require_live_env(LIVE_ENV, agent="baseline")
+
+
+def test_require_live_env_checks_the_fallback_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "mixed.yaml").write_text(
+        "name: mixed\nmodel: qwen3:8b\nfallback_model: claude-haiku-5-5\n"
+        "system_prompt: baseline.md\noutput_schema: InvestigationReport\n"
+    )
+    monkeypatch.setattr(runner, "CONFIGS_DIR", tmp_path)
+    assert runner.agent_providers("mixed") == {"openai_compat", "anthropic"}
+    with pytest.raises(LiveModeRefusedError, match="ANTHROPIC_API_KEY"):
+        require_live_env({"FIREBREAK_EVAL_LIVE": "1"}, agent="mixed")
+
+
+def test_unknown_agent_and_unpriced_model_are_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(EvalRunError, match="unknown agent 'nope'"):
+        runner.agent_config_path("nope")
+    with pytest.raises(EvalRunError, match="unknown agent"):
+        runner.agent_config_path("../baseline")
+    (tmp_path / "ghost.yaml").write_text(
+        "name: ghost\nmodel: not-a-model\nsystem_prompt: baseline.md\n"
+        "output_schema: InvestigationReport\n"
+    )
+    monkeypatch.setattr(runner, "CONFIGS_DIR", tmp_path)
+    with pytest.raises(EvalRunError, match="not-a-model"):
+        runner.agent_providers("ghost")
+
+
+def test_cli_baseline_local_needs_the_flag_but_no_anthropic_key(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("FIREBREAK_EVAL_LIVE", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    url = "postgresql+asyncpg://x:x@127.0.0.1:1/x"
+    assert main(["--database-url", url, "run", "--mode", "record", "--agent", "nope"]) == 1
+    assert "unknown agent" in capsys.readouterr().err
+    local = ["--database-url", url, "run", "--mode", "record", "--agent", "baseline-local"]
+    assert main(local) == 1
+    assert "FIREBREAK_EVAL_LIVE=1" in capsys.readouterr().err
+    monkeypatch.setenv("FIREBREAK_EVAL_LIVE", "1")
+    assert main(local) == 1  # gets past the live guard (no key needed), then stops later
+    assert "ANTHROPIC_API_KEY" not in capsys.readouterr().err
+    assert main(["--database-url", url, "run", "--mode", "record"]) == 1  # baseline: key needed
+    assert "ANTHROPIC_API_KEY" in capsys.readouterr().err
+
+
+def test_recordings_are_per_agent(tmp_path: Path) -> None:
+    local = recording_dir("baseline-local", "s01", tmp_path)
+    assert local == tmp_path / "baseline-local" / "s01"
+    assert local != recording_dir("baseline", "s01", tmp_path)

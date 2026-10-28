@@ -312,7 +312,9 @@ def build_llm_client(
     store = FixtureStore(settings.fixture_dir)
     if settings.mode is LLMMode.REPLAY:
         return StrictReplayLLMClient(store, scenario=scenario or settings.fixture_dir.name)
-    live = AnthropicLLMClient(settings)
+    from firebreak.llm.routing import RoutingLLMClient
+
+    live = RoutingLLMClient(settings)  # builds each provider's client only when first needed
     if settings.mode is LLMMode.RECORD:
         return RecordingLLMClient(live, store)
     return live
