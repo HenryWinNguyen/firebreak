@@ -4,8 +4,9 @@ import pytest
 
 from firebreak.models.evidence import EvidenceKind
 from firebreak.models.llm import ToolAccess
+from firebreak.tools.adapters.base import BackendTimeout
 from firebreak.tools.context import ToolContext
-from firebreak.tools.errors import ToolErrorCode
+from firebreak.tools.errors import ToolErrorCode, ToolTimeout
 from firebreak.tools.gateway import ToolGateway
 from firebreak.tools.registry import ToolOutput, ToolRegistry
 from tests.tools.fakes import INCIDENT, INJECTION, FakeEvidenceSink, NoArgs, make_cfg, make_registry
@@ -25,7 +26,37 @@ def ctx(sink: FakeEvidenceSink) -> ToolContext:
 
 @pytest.fixture
 def gw() -> ToolGateway:
-    return ToolGateway(make_registry())
+    reg = make_registry()
+    for name, handler in (
+        ("refuses_timeout", _refuses_timeout),
+        ("refuses_timeout_subclass", _refuses_timeout_subclass),
+        ("backend_timeout", _backend_timeout),
+    ):
+        reg.register(
+            name=name,
+            description=name,
+            args_model=NoArgs,
+            handler=handler,
+            access=ToolAccess.READ,
+            max_output_chars=3500,
+        )
+    return ToolGateway(reg)
+
+
+class _SubTimeout(ToolTimeout):
+    pass
+
+
+async def _refuses_timeout(args: NoArgs, ctx: ToolContext) -> ToolOutput:
+    raise ToolTimeout("handler claims a timeout")
+
+
+async def _refuses_timeout_subclass(args: NoArgs, ctx: ToolContext) -> ToolOutput:
+    raise _SubTimeout("handler claims a timeout")
+
+
+async def _backend_timeout(args: NoArgs, ctx: ToolContext) -> ToolOutput:
+    raise BackendTimeout("backend slow")
 
 
 async def test_happy_path_records_evidence_and_wraps(
@@ -228,6 +259,9 @@ async def test_nfkc_expanding_content_stays_within_the_cap(
         ("refuses_write", ToolErrorCode.HANDLER_FAILED),  # handler can't pick write_refused
         ("refuses_bare", ToolErrorCode.HANDLER_FAILED),  # bare ToolError: no AttributeError
         ("refuses_weird", ToolErrorCode.HANDLER_FAILED),  # subclass that skipped __init__
+        ("refuses_timeout", ToolErrorCode.HANDLER_FAILED),  # a handler can't claim `timeout`
+        ("refuses_timeout_subclass", ToolErrorCode.HANDLER_FAILED),
+        ("backend_timeout", ToolErrorCode.TIMEOUT),  # only the adapters' BackendTimeout maps
     ],
 )
 async def test_handler_tool_error_code_is_not_trusted(

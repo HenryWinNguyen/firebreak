@@ -234,16 +234,17 @@ def build_read_registry(
         t = now()
         if t.tzinfo is None:
             raise ValueError("clock must return an aware datetime")
-        return t.astimezone(UTC)
+        # Whole seconds, so Evidence.query reproduces the exact window that was requested.
+        return t.astimezone(UTC).replace(microsecond=0)
 
     async def promql_query(args: PromqlQueryArgs, ctx: ToolContext) -> ToolOutput:
-        at = args.at.astimezone(UTC) if args.at is not None else utc_now()
+        at = args.at.astimezone(UTC).replace(microsecond=0) if args.at is not None else utc_now()
         result = await ad.metrics.instant(args.query, at)
         return ToolOutput(
             kind=EvidenceKind.METRIC_SERIES,
             query=f"promql_query {args.query} @ {_iso(at)}",
             content=_series_text(result),
-            raw=json.dumps(result.raw),
+            raw=json.dumps(result.raw, allow_nan=False),
         )
 
     async def promql_range(args: PromqlRangeArgs, ctx: ToolContext) -> ToolOutput:
@@ -257,7 +258,7 @@ def build_read_registry(
                 f"step={args.step_seconds}s"
             ),
             content=_series_text(result),
-            raw=json.dumps(result.raw),
+            raw=json.dumps(result.raw, allow_nan=False),
         )
 
     async def list_metrics(args: ListMetricsArgs, ctx: ToolContext) -> ToolOutput:
@@ -280,7 +281,7 @@ def build_read_registry(
             kind=EvidenceKind.METRIC_SERIES,
             query=f"list_metrics prefix={prefix!r}",
             content=text,
-            raw=json.dumps(names),
+            raw=json.dumps(names, allow_nan=False),
         )
 
     async def logql_query(args: LogqlQueryArgs, ctx: ToolContext) -> ToolOutput:
@@ -293,7 +294,7 @@ def build_read_registry(
                 f"logql_query {args.query} | start={_iso(start)} end={_iso(end)} limit={args.limit}"
             ),
             content=render_logs(result),
-            raw=json.dumps(result.raw),
+            raw=json.dumps(result.raw, allow_nan=False),
         )
 
     async def recent_deploys(args: RecentDeploysArgs, ctx: ToolContext) -> ToolOutput:
@@ -305,7 +306,7 @@ def build_read_registry(
             kind=EvidenceKind.DEPLOY,
             query=f"recent_deploys service={args.service} limit={args.limit}",
             content="\n".join(rows) if rows else "(no deploys recorded)",
-            raw=json.dumps([d.model_dump(mode="json") for d in deploys]),
+            raw=json.dumps([d.model_dump(mode="json") for d in deploys], allow_nan=False),
         )
 
     async def service_graph(args: NoArgs, ctx: ToolContext) -> ToolOutput:
@@ -316,7 +317,7 @@ def build_read_registry(
             kind=EvidenceKind.CONFIG,
             query="service_graph config/service_graph.yaml",
             content="\n".join(parts),
-            raw=json.dumps({"clusters": g.clusters, "edges": g.edges}),
+            raw=json.dumps({"clusters": g.clusters, "edges": g.edges}, allow_nan=False),
         )
 
     reg = ToolRegistry()

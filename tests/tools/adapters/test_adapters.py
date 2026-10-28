@@ -199,7 +199,11 @@ async def test_redirects_are_not_followed() -> None:
         return httpx.Response(302, headers={"location": "/admin/chaos"})
 
     c = ReadOnlyClient(
-        backend="x", allowed_paths=frozenset({"/a"}), timeout_s=1, transport=transport(h)
+        backend="x",
+        allowed_paths=frozenset({"/a"}),
+        base_urls=["http://h"],
+        timeout_s=1,
+        transport=transport(h),
     )
     with pytest.raises(BackendError):
         await c.get_json("http://h/a")

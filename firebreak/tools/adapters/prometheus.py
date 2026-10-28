@@ -50,6 +50,7 @@ class PrometheusAdapter:
         self._http = ReadOnlyClient(
             backend="prometheus",
             allowed_paths=frozenset({_QUERY, _RANGE, _NAMES}),
+            base_urls=[self._base],
             timeout_s=timeout_s,
             transport=transport,
         )

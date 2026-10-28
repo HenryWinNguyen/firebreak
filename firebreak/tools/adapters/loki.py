@@ -43,6 +43,7 @@ class LokiAdapter:
         self._http = ReadOnlyClient(
             backend="loki",
             allowed_paths=frozenset({_RANGE}),
+            base_urls=[self._base],
             timeout_s=timeout_s,
             transport=transport,
         )

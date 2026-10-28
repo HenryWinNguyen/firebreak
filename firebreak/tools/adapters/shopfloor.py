@@ -43,6 +43,7 @@ class ShopfloorAdapter:
         self._http = ReadOnlyClient(
             backend="shopfloor",
             allowed_paths=frozenset({DEPLOYS_PATH}),
+            base_urls=self._urls.values(),
             timeout_s=timeout_s,
             headers={"Authorization": f"Bearer {admin_token}"},
             transport=transport,

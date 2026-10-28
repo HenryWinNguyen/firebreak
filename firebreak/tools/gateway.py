@@ -27,7 +27,8 @@ Model-facing error text is always gateway-authored. Anything a handler supplies
 (exception text, or the message of a ``ToolError`` it raised) is shown only as
 capped ``untrusted_detail`` inside an untrusted-data block. A handler can't pick
 the error code either: a ``ToolError`` it raises maps to ``invalid_args`` (if it
-is an ``InvalidToolArgs``) or ``handler_failed``.
+is an ``InvalidToolArgs``), ``timeout`` (only if it is exactly the read adapters'
+``BackendTimeout``) or ``handler_failed``.
 """
 
 import asyncio
@@ -42,6 +43,7 @@ from firebreak.models.agents import AgentConfig, ToolCallRecord
 from firebreak.models.common import new_id
 from firebreak.models.evidence import Evidence, EvidenceKind
 from firebreak.models.llm import ToolAccess, ToolSpec
+from firebreak.tools.adapters.base import BackendTimeout
 from firebreak.tools.context import ToolContext
 from firebreak.tools.errors import (
     EvidenceRecordFailed,
@@ -306,9 +308,13 @@ class ToolGateway:
     @staticmethod
     def _handler_refused(tool: RegisteredTool, e: ToolError) -> ToolError:
         """A ToolError raised by a handler: its code and text are not trusted."""
-        cls: type[ToolError] = (
-            InvalidToolArgs if isinstance(e, InvalidToolArgs) else ToolHandlerFailed
-        )
+        cls: type[ToolError]
+        if isinstance(e, InvalidToolArgs):
+            cls = InvalidToolArgs
+        elif type(e) is BackendTimeout:  # exact type: no other handler error can claim it
+            cls = ToolTimeout
+        else:
+            cls = ToolHandlerFailed
         text = getattr(e, "message", None) or str(e)
         extra = getattr(e, "untrusted_detail", None)
         detail = "\n".join(x for x in (text, extra) if isinstance(x, str) and x)
