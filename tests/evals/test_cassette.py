@@ -772,3 +772,104 @@ async def test_round_trip_through_investigate_and_postgres(
 
     assert no_timing(replayed.tool_calls) == no_timing(recorded.tool_calls)
     assert await _evidence_rows(engine) == recorded_rows
+
+
+# --- T-046: hardening -------------------------------------------------------------------
+
+
+def test_secret_scan_finds_base64_and_url_encoded_forms(tmp_path: Path) -> None:
+    import base64
+    import urllib.parse
+
+    secret = "sk-ant-abc/def+ghi=jkl"
+    forms = {
+        "b64.txt": base64.b64encode(secret.encode()).decode(),
+        "b64url.txt": base64.urlsafe_b64encode(secret.encode()).decode().rstrip("="),
+        "pct.txt": urllib.parse.quote(secret, safe=""),
+        "plus.txt": urllib.parse.quote_plus(secret),
+        "raw.txt": secret,
+    }
+    for name, form in forms.items():
+        (tmp_path / name).write_text(f"prefix {form} suffix")
+    (tmp_path / "clean.txt").write_text("nothing to see")
+    assert find_secrets(tmp_path, [secret]) == sorted(tmp_path / n for n in forms)
+
+
+def test_short_secret_warns_and_is_not_scanned(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    (tmp_path / "f.txt").write_text("hunter2 is here")
+    with caplog.at_level("WARNING", logger="firebreak.evals.cassette"):
+        assert find_secrets(tmp_path, ["hunter2"]) == []
+    assert "too short to scan" in caplog.text
+    assert "hunter2" not in caplog.text  # the value is never logged
+
+
+async def test_overwrite_failure_mid_swap_keeps_the_old_recording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = recording_dir("baseline", SCENARIO, root=tmp_path)
+    await record(directory)
+    before = {p.name: p.read_bytes() for p in directory.rglob("*") if p.is_file()}
+
+    real_rename = Path.rename
+
+    def flaky(self: Path, target: Any) -> Path:
+        if ".recording." in self.name and Path(target) == directory:
+            raise OSError("disk went away")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", flaky)
+    with (
+        pytest.raises(OSError, match="disk went away"),
+        record_run(
+            directory,
+            agent="baseline",
+            scenario=SCENARIO,
+            at=AT,
+            adapters=live_adapters(Live()),
+            llm=script(),
+            secrets=[],
+            overwrite=True,
+        ) as rec,
+    ):
+        await run_baseline(rec.llm, rec.adapters)
+    monkeypatch.undo()
+
+    after = {p.name: p.read_bytes() for p in directory.rglob("*") if p.is_file()}
+    assert after == before
+    assert not list(directory.parent.glob(".*"))  # staging and aside are gone
+    with replay_run(directory) as rp:
+        await run_baseline(rp.llm, rp.adapters)
+
+
+async def test_overwrite_succeeds_and_staging_names_are_unique(tmp_path: Path) -> None:
+    directory = recording_dir("baseline", SCENARIO, root=tmp_path)
+    await record(directory)
+    with record_run(
+        directory,
+        agent="baseline",
+        scenario=SCENARIO,
+        at=AT,
+        adapters=live_adapters(Live()),
+        llm=script(),
+        secrets=[],
+        overwrite=True,
+    ) as rec:
+        staging = rec.cassette.directory
+        assert staging.name.startswith(f".{SCENARIO}.recording.") and staging != directory
+        await run_baseline(rec.llm, rec.adapters)
+    assert not list(directory.parent.glob(".*"))
+    with replay_run(directory) as rp:
+        await run_baseline(rp.llm, rp.adapters)
+
+
+async def test_replay_fails_when_recorded_tool_calls_are_not_consumed(tmp_path: Path) -> None:
+    directory = recording_dir("baseline", SCENARIO, root=tmp_path)
+    await record(directory)
+    with (
+        pytest.raises(StaleRecordingError, match="ended after 0 tool calls") as ei,
+        replay_run(directory),
+    ):
+        pass  # the run makes no adapter calls at all
+    assert ei.value.step == "tool call 1"

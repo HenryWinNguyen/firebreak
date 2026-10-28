@@ -66,11 +66,41 @@ def test_key_ignores_untrusted_nonces_but_not_content() -> None:
 
 def test_key_keeps_nonce_structure() -> None:
     """Two blocks sharing one nonce vs two distinct nonces are different conversations."""
-    one = 'x <d nonce="0123456789abcdef"> </d nonce="0123456789abcdef">'
-    two = 'x <d nonce="0123456789abcdef"> </d nonce="fedcba9876543210">'
+    open_tag = '<untrusted-data source="a" nonce="0123456789abcdef">'
+    one = f'x {open_tag} </untrusted-data nonce="0123456789abcdef">'
+    two = f'x {open_tag} </untrusted-data nonce="fedcba9876543210">'
     r1 = LLMRequest(model="m", system="s", messages=[{"role": "user", "content": one}])
     r2 = LLMRequest(model="m", system="s", messages=[{"role": "user", "content": two}])
     assert fixture_key(r1) != fixture_key(r2)
+
+
+def _one(content: str) -> LLMRequest:
+    return LLMRequest(model="m", system="s", messages=[{"role": "user", "content": content}])
+
+
+def test_nonce_shaped_text_in_content_is_hashed() -> None:
+    """Only real wrapper tags normalize; a nonce-shaped literal in content is content."""
+    a = _one('tool said: nonce="0123456789abcdef"')
+    b = _one('tool said: nonce="fedcba9876543210"')
+    assert fixture_key(a) != fixture_key(b)
+    # Even next to real tags, a bare literal is not rewritten.
+    real = (
+        '<untrusted-data source="s" nonce="aaaaaaaaaaaaaaaa">\n{}\n'
+        '</untrusted-data nonce="aaaaaaaaaaaaaaaa">'
+    )
+    c = _one(real.format('see nonce="0123456789abcdef"'))
+    d = _one(real.format('see nonce="fedcba9876543210"'))
+    assert fixture_key(c) != fixture_key(d)
+
+
+def test_real_tags_still_normalize() -> None:
+    tmpl = (
+        '<untrusted-data source="s" evidence_id="ev_1" nonce="{n}">\nx\n'
+        '</untrusted-data nonce="{n}">'
+    )
+    assert fixture_key(_one(tmpl.format(n="0123456789abcdef"))) == fixture_key(
+        _one(tmpl.format(n="fedcba9876543210"))
+    )
 
 
 def test_first_difference_names_the_part() -> None:
