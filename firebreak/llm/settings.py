@@ -31,3 +31,6 @@ class LLMSettings(BaseSettings):
     # Retries after the first attempt for the local provider. Kept at 1 (not max_retries) because
     # each attempt can take up to openai_timeout_seconds; 5 x 300s would stall a hung model ~25 min.
     openai_max_retries: int = Field(default=1, ge=0, le=4)
+    # Must equal the server's OLLAMA_CONTEXT_LENGTH (Ollama defaults to 4096 and silently truncates
+    # longer prompts). Prompt size is estimated conservatively as chars / 3.
+    openai_context_tokens: int = Field(default=32768, gt=0)

@@ -28,6 +28,7 @@ from firebreak.llm import (
     UnknownModelError,
     build_llm_client,
 )
+from firebreak.llm.openai_compat import ContextOverflowError
 from firebreak.models.llm import LLMRequest, LLMResponse, ToolSpec, Usage
 
 LOCAL = "qwen3:8b"
@@ -612,3 +613,61 @@ def test_provider_is_required_in_pricing_entries(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="provider"):
         PricingTable.load(p)
+
+
+# ---- context overflow guard (T-050) ----
+
+
+def big_req(chars: int, max_tokens: int = 4096) -> LLMRequest:
+    return req([{"role": "user", "content": "x" * chars}]).model_copy(
+        update={"max_tokens": max_tokens}
+    )
+
+
+async def test_preflight_refuses_oversized_prompt_without_sending() -> None:
+    fake = ok()
+    client, sleeps = make_client(fake, openai_context_tokens=8192)
+    with pytest.raises(ContextOverflowError) as exc_info:
+        await client.complete(big_req(15000))  # ~5000 est + 4096 > 8192
+    assert fake.requests == [] and sleeps == []
+    assert isinstance(exc_info.value, LLMError) and not exc_info.value.retryable
+    assert "FIREBREAK_LLM_OPENAI_CONTEXT_TOKENS=8192" in str(exc_info.value)
+
+
+async def test_preflight_counts_max_tokens() -> None:
+    client, _ = make_client(ok(), openai_context_tokens=4000)
+    with pytest.raises(ContextOverflowError):
+        await client.complete(big_req(30, max_tokens=4000))
+
+
+async def test_normal_request_unaffected_and_default_is_32768() -> None:
+    assert LLMSettings().openai_context_tokens == 32768
+    fake = ok()
+    client, _ = make_client(fake)
+    resp = await client.complete(req())
+    assert len(fake.requests) == 1 and resp.stop_reason == "end_turn"
+
+
+async def test_post_reply_detects_truncation_with_clear_message() -> None:
+    usage = {"prompt_tokens": 7950, "completion_tokens": 100, "total_tokens": 8050}
+    client, _ = make_client(ok(chat_json(usage=usage)), openai_context_tokens=8192)
+    with pytest.raises(ContextOverflowError) as exc_info:
+        await client.complete(req())
+    msg = str(exc_info.value)
+    assert LOCAL in msg and "7950" in msg and "100" in msg
+    assert "FIREBREAK_LLM_OPENAI_CONTEXT_TOKENS" in msg and "OLLAMA_CONTEXT_LENGTH" in msg
+
+
+async def test_post_reply_just_below_threshold_is_fine() -> None:
+    usage = {"prompt_tokens": 7000, "completion_tokens": 1000}  # 8000 < 0.98 * 8192
+    client, _ = make_client(ok(chat_json(usage=usage)), openai_context_tokens=8192)
+    assert (await client.complete(req())).usage.input_tokens == 7000
+
+
+async def test_overflow_is_not_retried_and_skips_fallback() -> None:
+    usage = {"prompt_tokens": 8000, "completion_tokens": 192}
+    fake = ok(chat_json(usage=usage))
+    client, sleeps = make_client(fake, openai_context_tokens=8192)
+    with pytest.raises(ContextOverflowError):
+        await client.complete(req(fallback_model="llama3:8b"))
+    assert len(fake.requests) == 1 and sleeps == []
