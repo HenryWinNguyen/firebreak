@@ -17,8 +17,7 @@ one ``EvalRunError`` naming them, with nothing stored.
 import logging
 import os
 import subprocess
-from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -34,7 +33,6 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-import firebreak.agents.baseline as baseline_module
 import firebreak.db
 from firebreak.agents.baseline import BaselineResult, investigate
 from firebreak.agents.config import CONFIGS_DIR
@@ -334,14 +332,14 @@ async def replay_scenario(
     with replay_run(directory) as rp:
         await _install_incident(repo, sessions, info)
         registry = build_read_registry(tools_settings, rp.adapters)
-        with _agent_config(agent):
-            result = await investigate(
-                info.incident.id,
-                llm=rp.llm,
-                sessions=sessions,
-                tools_settings=tools_settings,
-                registry=registry,
-            )
+        result = await investigate(
+            info.incident.id,
+            llm=rp.llm,
+            sessions=sessions,
+            tools_settings=tools_settings,
+            registry=registry,
+            config_path=agent_config_path(agent),
+        )
         prompt_sha = rp.meta.prompt_sha256
     kinds = await repo.evidence_kinds(info.incident.id)
     # Replay speed says nothing about the agent; report the recorded live latency.
@@ -376,23 +374,6 @@ def agent_providers(agent: str) -> set[str]:
         return {pricing.provider_for(m) for m in agent_models(agent)}
     except LLMError as exc:  # UnknownModelError: a model with no provider is never run
         raise EvalRunError(f"agent {agent!r}: {exc}") from exc
-
-
-@contextmanager
-def _agent_config(agent: str) -> Iterator[None]:
-    """Point ``investigate`` at ``agent``'s config for the duration of one run.
-
-    ``investigate`` (``agents/baseline.py``, not owned by T-047) reads a module-level
-    ``BASELINE_CONFIG``. Until it takes an agent argument, swap that path here and always
-    restore it. Eval scenarios run one at a time, so there is no concurrent user.
-    """
-    path = agent_config_path(agent)
-    previous = baseline_module.BASELINE_CONFIG
-    baseline_module.BASELINE_CONFIG = path
-    try:
-        yield
-    finally:
-        baseline_module.BASELINE_CONFIG = previous
 
 
 def require_live_env(env: Mapping[str, str] | None = None, *, agent: str = "baseline") -> None:
@@ -447,24 +428,22 @@ async def record_scenario(
         sessions,
         RecordedRunInfo(incident=incident, alerts=alerts, latency_s=0.0),
     )
-    with (
-        record_run(
-            directory,
-            agent=agent,
-            scenario=key,
-            at=utcnow(),
-            adapters=adapters,
-            llm=llm,
-            overwrite=overwrite,
-        ) as rec,
-        _agent_config(agent),
-    ):
+    with record_run(
+        directory,
+        agent=agent,
+        scenario=key,
+        at=utcnow(),
+        adapters=adapters,
+        llm=llm,
+        overwrite=overwrite,
+    ) as rec:
         result = await investigate(
             incident_id,
             llm=rec.llm,
             sessions=sessions,
             tools_settings=tools_settings,
             registry=build_read_registry(tools_settings, rec.adapters),
+            config_path=agent_config_path(agent),
         )
     info = RecordedRunInfo(incident=incident, alerts=alerts, latency_s=result.latency_s)
     (directory / RUN_FILE).write_text(info.model_dump_json(indent=2) + "\n", encoding="utf-8")

@@ -21,6 +21,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 
 from pydantic import ValidationError
 
@@ -112,9 +113,11 @@ async def investigate(
     sessions: SessionFactory,
     tools_settings: ToolSettings,
     registry: ToolRegistry | None = None,
+    config_path: Path = BASELINE_CONFIG,
 ) -> BaselineResult:
     """Run the baseline agent on one incident.
 
+    ``config_path`` picks the agent config (default: baseline).
     ``registry`` is for tests. When omitted, the real read tools are built and their HTTP
     clients are closed before returning.
     """
@@ -132,7 +135,7 @@ async def investigate(
             ServiceGraph.load()
             adapters = build_default_adapters(tools_settings)
             registry = build_read_registry(tools_settings, adapters)
-        cfg = load_agent_config(BASELINE_CONFIG, registry)
+        cfg = load_agent_config(config_path, registry)
         ctx = ToolContext(incident_id=incident.id, evidence=PostgresEvidenceSink(sessions))
         run = await run_agent(cfg, build_task(incident, alerts), ctx, llm, ToolGateway(registry))
     finally:
