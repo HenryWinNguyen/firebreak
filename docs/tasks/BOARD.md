@@ -9,6 +9,7 @@
 | T-013 | Observability stack + alert rules | target | sonnet | — | merged | #10 |
 | T-014 | M1 acceptance: S1–S4 alerts | target | sonnet | T-012, T-013 | merged | #20 |
 | T-015 | Observability follow-ups (T-013 minors) | target | sonnet | T-013, T-014 | ready | |
+| T-016 | Live validation of S5–S7 (tune scenario files) | target | sonnet | T-043 | pending | |
 | T-022 | Persistence layer | core | sonnet | — | merged | #4 |
 | T-025 | Persistence hardening (T-022 review follow-ups) | core | sonnet | — | merged | #18 |
 | T-026 | Grouper onto shared repo methods + tests | core | sonnet | T-025 | merged | #21 |
@@ -23,7 +24,7 @@
 | T-035 | Read-tool hardening (T-034 minors) | agents | sonnet | T-034 | merged | #31 |
 | T-041 | Single-agent baseline (config, prompt, runner, CLI) | agents | sonnet | T-033, T-034 | merged | #32 |
 | T-042 | M3 acceptance: live S1–S7 (**paid, needs Henry**) | evals | sonnet | T-014, T-041, T-044, T-045 | **waiting on Henry** |  |
-| T-043 | Eval scenarios S1–S7 + deterministic grader | evals | sonnet | T-041 | in-progress | |
+| T-043 | Eval scenarios S1–S7 + deterministic grader | evals | sonnet | T-041 | rework | #37 |
 | T-044 | Record/replay cassettes (tools + LLM, deterministic) | evals | **opus** (high risk) | T-041 | in-progress | |
 | T-045 | Eval runner, results tables, `make eval`, REPORT.md | evals | sonnet | T-043, T-044 | pending | |
 
