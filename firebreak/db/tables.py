@@ -11,6 +11,7 @@ from sqlalchemy import (
     Index,
     Integer,
     MetaData,
+    Numeric,
     String,
     Text,
     func,
@@ -130,7 +131,7 @@ class EvalResultRow(Base):
     top3: Mapped[bool] = mapped_column(Boolean)
     cited_kinds_ok: Mapped[bool] = mapped_column(Boolean)
     report_valid: Mapped[bool] = mapped_column(Boolean)
-    cost_usd: Mapped[float] = mapped_column(Float)
+    cost_usd: Mapped[float] = mapped_column(Numeric(12, 6, asdecimal=False))
     latency_s: Mapped[float] = mapped_column(Float)
     steps: Mapped[int] = mapped_column(Integer)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

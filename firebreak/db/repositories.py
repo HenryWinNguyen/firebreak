@@ -8,6 +8,7 @@ the ``*_in`` method, and the plain method is a thin wrapper around it.
 Datetimes passed to any method must be timezone-aware (``ValueError`` otherwise).
 """
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
@@ -42,6 +43,10 @@ class IncidentNotFoundError(PersistenceError):
     def __init__(self, incident_id: str) -> None:
         super().__init__(f"incident not found: {incident_id}")
         self.incident_id = incident_id
+
+
+class PurgeRefusedError(PersistenceError):
+    """A purge would delete rows the caller did not name."""
 
 
 class AlertNotFoundError(PersistenceError):
@@ -583,16 +588,16 @@ class EvalRepository:
             )
             return {r.id: EvidenceKind(r.kind) for r in rows}
 
-    async def purge_incident(self, incident_id: str) -> bool:
-        """Delete an incident with its evidence (and blobs) and its alerts. False if absent.
+    async def purge_incident(self, incident_id: str, alert_ids: Sequence[str]) -> bool:
+        """Delete one incident, its evidence (and blobs) and exactly ``alert_ids``.
 
-        A replay recreates the recorded incident under its recorded ids, so a previous replay's
-        copy must go first. This removes *every* row under those ids.
+        Returns False if there was nothing to delete. Raises ``PurgeRefusedError``, with no
+        deletes, if the stored incident is linked to any alert outside ``alert_ids`` or if any
+        of ``alert_ids`` is linked to another incident.
         """
+        allowed = set(alert_ids)
         async with self._sessions() as session, session.begin():
-            if await session.get(IncidentRow, incident_id) is None:
-                return False
-            alert_ids = (
+            linked = set(
                 (
                     await session.execute(
                         select(IncidentAlertRow.alert_id).where(
@@ -603,6 +608,35 @@ class EvalRepository:
                 .scalars()
                 .all()
             )
+            extra = sorted(linked - allowed)
+            if extra:
+                raise PurgeRefusedError(
+                    f"incident {incident_id} has alerts not in the recording: {extra}"
+                )
+            shared = sorted(
+                (
+                    await session.execute(
+                        select(IncidentAlertRow.alert_id).where(
+                            IncidentAlertRow.alert_id.in_(allowed),
+                            IncidentAlertRow.incident_id != incident_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if shared:
+                raise PurgeRefusedError(
+                    f"alerts {shared} are linked to another incident; refusing to delete them"
+                )
+            exists = await session.get(IncidentRow, incident_id) is not None
+            present_alerts = (
+                (await session.execute(select(AlertRow.id).where(AlertRow.id.in_(allowed))))
+                .scalars()
+                .all()
+            )
+            if not exists and not present_alerts:
+                return False
             raw_refs = (
                 (
                     await session.execute(
@@ -617,6 +651,6 @@ class EvalRepository:
                 await session.execute(
                     delete(EvidenceBlobRow).where(EvidenceBlobRow.key.in_(raw_refs))
                 )
-            if alert_ids:
-                await session.execute(delete(AlertRow).where(AlertRow.id.in_(alert_ids)))
+            if present_alerts:
+                await session.execute(delete(AlertRow).where(AlertRow.id.in_(present_alerts)))
         return True

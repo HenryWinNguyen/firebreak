@@ -12,8 +12,11 @@ import httpx
 import httpx2
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.pool import NullPool
 
+from firebreak.db.engine import make_session_factory
 from firebreak.db.repositories import (
     AlertRepository,
     EvalRepository,
@@ -28,7 +31,9 @@ from firebreak.evals.report import NoRunsError, render_report
 from firebreak.evals.runner import (
     RUN_FILE,
     EvalRunError,
+    EvalSettings,
     LiveModeRefusedError,
+    ensure_eval_database,
     record_scenario,
     replay_all,
     require_live_env,
@@ -100,15 +105,18 @@ async def seed_live_incident(sessions: SessionFactory) -> str:
     return inc.id
 
 
-async def make_recording(root: Path, sessions: SessionFactory) -> str:
+async def make_recording(
+    root: Path, sessions: SessionFactory, live_sessions: SessionFactory | None = None
+) -> str:
     """A synthetic S1 recording through the real record path (scripted LLM, fake adapters)."""
-    incident_id = await seed_live_incident(sessions)
+    incident_id = await seed_live_incident(live_sessions or sessions)
     outcome = await record_scenario(
         S1,
         incident_id,
         agent="baseline",
         root=root,
         sessions=sessions,
+        live_sessions=live_sessions or sessions,
         tools_settings=ToolSettings(),
         llm=script(),
         adapters=live_adapters(Live()),
@@ -196,8 +204,8 @@ def test_render_report_tables_and_summary() -> None:
     assert f"| S1 | {SCENARIOS['S1'].expect.root_cause_category.value} | yes | yes |" in md
     assert "| S2 |" in md and "a \\| b" in md  # pipes escaped
     assert "top-1 67%, top-3 100%" in md
-    assert "latency p50 20.0s / p95 30.0s" in md
-    assert "cost p50 $0.2000 / p95 $0.3000, 1 errored" in md
+    assert "latency (recorded live run) p50 20.0s / p95 30.0s" in md
+    assert "cost (recorded live run) p50 $0.2000 / p95 $0.3000, 1 errored" in md
     assert render_report([(run, results)], SCENARIOS) == md  # deterministic
     with pytest.raises(NoRunsError):
         render_report([], SCENARIOS)
@@ -327,3 +335,129 @@ async def test_cli_run_then_report(
     md = out.read_text()
     assert "## Agent: baseline" in md and "| S1 | bad_deploy |" in md
     assert "S2" not in md
+
+
+def test_cli_refuses_databases_not_named_eval_or_test(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    for sub in (["run", "--mode", "replay"], ["report", "--out", str(tmp_path / "R.md")]):
+        code = main(["--database-url", "postgresql+asyncpg://x:x@127.0.0.1:1/firebreak", *sub])
+        assert code == 1
+        assert "must end with _eval or _test" in capsys.readouterr().err
+    assert not (tmp_path / "R.md").exists()
+
+
+def test_default_eval_url_is_firebreak_eval_on_the_dev_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("FIREBREAK_EVAL_DATABASE_URL", raising=False)
+    monkeypatch.setenv("FIREBREAK_DATABASE_URL", "postgresql+asyncpg://u:p@h:5/firebreak")
+    url = make_url(EvalSettings(_env_file=None).resolved_database_url())
+    assert (url.database, url.host, url.username, url.password) == ("firebreak_eval", "h", "u", "p")
+    monkeypatch.setenv("FIREBREAK_EVAL_DATABASE_URL", "postgresql+asyncpg://u:p@h:5/other_eval")
+    assert make_url(EvalSettings(_env_file=None).resolved_database_url()).database == "other_eval"
+
+
+@pytest.mark.db
+async def test_replay_refuses_sessions_on_a_non_eval_database(
+    tmp_path: Path, migrated_url: str
+) -> None:
+    url = make_url(migrated_url).set(database="firebreak")
+    eng = create_async_engine(url, poolclass=NullPool)  # lazy: never connects
+    with pytest.raises(EvalRunError, match="must end with"):
+        await replay_all(
+            [S1],
+            agent="baseline",
+            root=tmp_path,
+            sessions=make_session_factory(eng),
+            tools_settings=ToolSettings(),
+        )
+
+
+@pytest.mark.db
+async def test_replay_refuses_when_the_eval_db_has_an_extra_alert_on_the_incident(
+    tmp_path: Path, engine: AsyncEngine, sessions: SessionFactory, no_http: list[str]
+) -> None:
+    root = tmp_path / "recordings"
+    incident_id = await make_recording(root, sessions)
+    extra = Alert(
+        source=AlertSource.ALERTMANAGER,
+        fingerprint="fp-late",
+        alertname="Late",
+        service="orders",
+        severity=Severity.WARNING,
+        summary="attached after recording",
+        started_at=utcnow(),
+    )
+    await AlertRepository(sessions).insert_if_new(extra)
+    await IncidentRepository(sessions).attach_alert(incident_id, extra.id, "orders")
+    with pytest.raises(EvalRunError, match="not in the recording"):
+        await replay_all(
+            [S1], agent="baseline", root=root, sessions=sessions, tools_settings=ToolSettings()
+        )
+    async with engine.connect() as conn:  # nothing was deleted
+        assert (await conn.execute(text("SELECT count(*) FROM alerts"))).scalar_one() == 2
+        assert (await conn.execute(text("SELECT count(*) FROM incidents"))).scalar_one() == 1
+
+
+@pytest.mark.db
+async def test_replay_refuses_an_alert_shared_with_another_incident(
+    tmp_path: Path, engine: AsyncEngine, sessions: SessionFactory, no_http: list[str]
+) -> None:
+    root = tmp_path / "recordings"
+    incident_id = await make_recording(root, sessions)
+    (alert_id,) = (await IncidentRepository(sessions).list_alerts(incident_id))[0].id.split()
+    other = await IncidentRepository(sessions).create(
+        Incident(
+            severity=Severity.WARNING,
+            cluster="checkout",
+            services=["orders"],
+            alert_ids=[alert_id],
+            window_closes_at=utcnow() + timedelta(seconds=60),
+        )
+    )
+    # Drop the original incident so the recorded one is "absent" and the alert is only shared.
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM incidents WHERE id = :i"), {"i": incident_id})
+    with pytest.raises(EvalRunError, match="linked to another incident"):
+        await replay_all(
+            [S1], agent="baseline", root=root, sessions=sessions, tools_settings=ToolSettings()
+        )
+    assert await IncidentRepository(sessions).get(other.id) is not None
+    async with engine.connect() as conn:
+        assert (await conn.execute(text("SELECT count(*) FROM alerts"))).scalar_one() == 1
+
+
+@pytest.mark.db
+async def test_ensure_eval_database_creates_migrates_and_isolates_record_mode(
+    tmp_path: Path, migrated_url: str, engine: AsyncEngine, sessions: SessionFactory
+) -> None:
+    """Record reads the live DB and writes only the recording dir and the eval DB."""
+    base = make_url(migrated_url)
+    eval_url = base.set(database="t045_runner_eval").render_as_string(hide_password=False)
+    admin = create_async_engine(
+        base.set(database="postgres"), isolation_level="AUTOCOMMIT", poolclass=NullPool
+    )
+    async with admin.connect() as conn:
+        await conn.execute(text("DROP DATABASE IF EXISTS t045_runner_eval"))
+    try:
+        await ensure_eval_database(eval_url)
+        await ensure_eval_database(eval_url)  # idempotent
+        eval_eng = create_async_engine(eval_url, poolclass=NullPool)
+        try:
+            eval_sessions = make_session_factory(eval_eng)
+            incident_id = await make_recording(tmp_path / "rec", eval_sessions, sessions)
+            async with engine.connect() as conn:  # live DB: only the seeded incident, untouched
+                assert (
+                    await conn.execute(text("SELECT count(*) FROM incidents"))
+                ).scalar_one() == 1
+                assert (await conn.execute(text("SELECT count(*) FROM evidence"))).scalar_one() == 0
+            assert await IncidentRepository(eval_sessions).get(incident_id) is not None
+            async with eval_eng.connect() as conn:
+                assert (await conn.execute(text("SELECT count(*) FROM evidence"))).scalar_one() == 6
+        finally:
+            await eval_eng.dispose()
+    finally:
+        async with admin.connect() as conn:
+            await conn.execute(text("DROP DATABASE IF EXISTS t045_runner_eval WITH (FORCE)"))
+        await admin.dispose()

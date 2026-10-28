@@ -68,8 +68,8 @@ def render_report(runs: Runs, scenarios: Mapping[str, Scenario]) -> str:
             f"- Git `{(run.git_sha or 'unknown')[:12]}`, prompt sha256 "
             f"`{(run.prompt_sha256 or 'unknown')[:12]}`",
             "",
-            "| Scenario | Expected | Top-1 | Top-3 | Cited kinds | Valid | Cost (USD) "
-            "| Latency (s) | Steps | Error |",
+            "| Scenario | Expected | Top-1 | Top-3 | Cited kinds | Valid "
+            "| Cost USD (recorded live run) | Latency s (recorded live run) | Steps | Error |",
             "|---|---|---|---|---|---|---|---|---|---|",
         ]
         for r in ordered:
@@ -85,8 +85,9 @@ def render_report(runs: Runs, scenarios: Mapping[str, Scenario]) -> str:
                 "",
                 f"**Summary ({s.n} scenarios):** top-1 {_pct(s.top1_accuracy)}, "
                 f"top-3 {_pct(s.top3_accuracy)}, "
-                f"latency p50 {s.latency_p50_s:.1f}s / p95 {s.latency_p95_s:.1f}s, "
-                f"cost p50 ${s.cost_p50_usd:.4f} / p95 ${s.cost_p95_usd:.4f}, "
+                f"latency (recorded live run) p50 {s.latency_p50_s:.1f}s / "
+                f"p95 {s.latency_p95_s:.1f}s, "
+                f"cost (recorded live run) p50 ${s.cost_p50_usd:.4f} / p95 ${s.cost_p95_usd:.4f}, "
                 f"{s.error_count} errored.",
             ]
         else:

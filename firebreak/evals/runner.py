@@ -22,15 +22,26 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from alembic import command
+from alembic.config import Config
 from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy import text
+from sqlalchemy.engine import Connection, make_url
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
+import firebreak.db
 from firebreak.agents.baseline import BaselineResult, investigate
+from firebreak.config import Settings
 from firebreak.db.repositories import (
     AlertRepository,
     EvalRepository,
     EvalResult,
     EvalRun,
     IncidentRepository,
+    PurgeRefusedError,
     SessionFactory,
 )
 from firebreak.evals.cassette import (
@@ -61,8 +72,83 @@ LIVE_FLAG = "FIREBREAK_EVAL_LIVE"
 API_KEY_VAR = "ANTHROPIC_API_KEY"
 
 
+EVAL_DB_SUFFIXES = ("_eval", "_test")
+DEFAULT_EVAL_DB = "firebreak_eval"
+_DB_DIR = Path(firebreak.db.__file__).parent
+
+
 class EvalRunError(Exception):
     """The eval run cannot complete (stale or unreadable recordings, bad arguments)."""
+
+
+class EvalSettings(BaseSettings):
+    """``FIREBREAK_EVAL_*``. Evals never use ``FIREBREAK_DATABASE_URL`` for writes."""
+
+    model_config = SettingsConfigDict(env_prefix="FIREBREAK_EVAL_", env_file=".env", extra="ignore")
+
+    #: Default: the dev server, database ``firebreak_eval``.
+    database_url: str | None = None
+
+    def resolved_database_url(self) -> str:
+        if self.database_url:
+            return self.database_url
+        dev = make_url(Settings().database_url)
+        return dev.set(database=DEFAULT_EVAL_DB).render_as_string(hide_password=False)
+
+
+def require_eval_database_name(name: str | None) -> None:
+    """Replay deletes and recreates incidents by id: only ever in a disposable database."""
+    if not name or not name.endswith(EVAL_DB_SUFFIXES):
+        raise EvalRunError(
+            f"refusing to run evals against database {name!r}: its name must end with "
+            f"{' or '.join(EVAL_DB_SUFFIXES)} (set FIREBREAK_EVAL_DATABASE_URL)"
+        )
+
+
+def _sessions_db_name(sessions: SessionFactory) -> str | None:
+    bind = sessions.kw.get("bind")
+    return None if bind is None else bind.url.database
+
+
+async def ensure_eval_database(url: str) -> None:
+    """Create the eval database if missing (via the server's ``postgres`` db) and migrate it."""
+    parsed = make_url(url)
+    require_eval_database_name(parsed.database)
+    name = str(parsed.database)
+    admin = create_async_engine(
+        parsed.set(database="postgres"), isolation_level="AUTOCOMMIT", poolclass=NullPool
+    )
+    try:
+        async with admin.connect() as conn:
+            found = (
+                await conn.execute(
+                    text("SELECT 1 FROM pg_database WHERE datname = :n"), {"n": name}
+                )
+            ).first()
+            if found is None:
+                logger.info("creating eval database %s", name)
+                quoted = '"' + name.replace('"', '""') + '"'
+                await conn.execute(text(f"CREATE DATABASE {quoted}"))
+    except DBAPIError as exc:
+        raise EvalRunError(
+            f"could not create eval database {name!r}: {exc.orig or exc}. Create it yourself "
+            f"(CREATE DATABASE {name}) or grant the role CREATEDB"
+        ) from exc
+    finally:
+        await admin.dispose()
+    eng = create_async_engine(url, poolclass=NullPool)
+    try:
+        async with eng.begin() as conn:
+            await conn.run_sync(_upgrade_head)
+    finally:
+        await eng.dispose()
+
+
+def _upgrade_head(sync_conn: Connection) -> None:
+    cfg = Config(str(_DB_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(_DB_DIR / "migrations"))
+    cfg.attributes["connection"] = sync_conn
+    command.upgrade(cfg, "head")
 
 
 class LiveModeRefusedError(EvalRunError):
@@ -167,7 +253,10 @@ async def _install_incident(
     repo: EvalRepository, sessions: SessionFactory, info: RecordedRunInfo
 ) -> None:
     """Recreate the recorded incident and alerts under their recorded ids, replacing any copy."""
-    await repo.purge_incident(info.incident.id)
+    try:
+        await repo.purge_incident(info.incident.id, [a.id for a in info.alerts])
+    except PurgeRefusedError as exc:
+        raise EvalRunError(f"eval database not safe to replay into: {exc}") from exc
     alerts = AlertRepository(sessions)
     for a in info.alerts:
         stored_id, inserted = await alerts.insert_or_get(a)
@@ -191,6 +280,7 @@ async def replay_scenario(
 
     Raises ``StaleRecordingError`` (naming the scenario) if the recording no longer matches.
     """
+    require_eval_database_name(_sessions_db_name(sessions))
     key = scenario_key(scenario.id)
     directory = recording_dir(agent, key, root)
     if not (directory / META_FILE).exists():
@@ -232,21 +322,32 @@ async def record_scenario(
     agent: str,
     root: Path,
     sessions: SessionFactory,
+    live_sessions: SessionFactory,
     tools_settings: ToolSettings,
     llm: LLMClient,
     adapters: ReadAdapters,
     overwrite: bool = False,
     env: Mapping[str, str] | None = None,
 ) -> ScenarioOutcome:
-    """Record one live run on an existing incident (T-042 drives this). Spends money."""
+    """Record one live run on an existing incident (T-042 drives this). Spends money.
+
+    The incident is read from ``live_sessions`` (read-only: ``get`` and ``list_alerts``); a copy
+    is installed in the eval database (``sessions``), which is the only database written.
+    """
     require_live_env(env)
+    require_eval_database_name(_sessions_db_name(sessions))
     key = scenario_key(scenario.id)
     directory = recording_dir(agent, key, root)
-    incidents = IncidentRepository(sessions)
-    incident = await incidents.get(incident_id)
+    live = IncidentRepository(live_sessions)
+    incident = await live.get(incident_id)
     if incident is None:
         raise EvalRunError(f"scenario {scenario.id}: incident {incident_id} not found")
-    alerts = await incidents.list_alerts(incident_id)
+    alerts = await live.list_alerts(incident_id)
+    await _install_incident(
+        EvalRepository(sessions),
+        sessions,
+        RecordedRunInfo(incident=incident, alerts=alerts, latency_s=0.0),
+    )
     with record_run(
         directory,
         agent=agent,

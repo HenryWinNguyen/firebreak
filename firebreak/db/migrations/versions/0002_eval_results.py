@@ -36,7 +36,7 @@ def upgrade() -> None:
         sa.Column("top3", sa.Boolean(), nullable=False),
         sa.Column("cited_kinds_ok", sa.Boolean(), nullable=False),
         sa.Column("report_valid", sa.Boolean(), nullable=False),
-        sa.Column("cost_usd", sa.Float(), nullable=False),
+        sa.Column("cost_usd", sa.Numeric(12, 6, asdecimal=False), nullable=False),
         sa.Column("latency_s", sa.Float(), nullable=False),
         sa.Column("steps", sa.Integer(), nullable=False),
         sa.Column("error", sa.Text(), nullable=True),

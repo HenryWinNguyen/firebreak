@@ -24,6 +24,7 @@ from firebreak.db.repositories import (
     EvalRun,
     IncidentRepository,
     PostgresEvidenceSink,
+    PurgeRefusedError,
 )
 from firebreak.db.tables import Base
 from firebreak.models.evidence import Evidence, EvidenceKind
@@ -152,8 +153,33 @@ async def test_evidence_kinds_and_purge_incident(sessions: Sessions, engine: Asy
     assert await repo.evidence_kinds(inc.id) == {"ev_1": EvidenceKind.DEPLOY}
     assert await repo.evidence_kinds("inc_other") == {}
 
-    assert await repo.purge_incident(inc.id) is True
-    assert await repo.purge_incident(inc.id) is False
+    assert await repo.purge_incident(inc.id, [alert.id]) is True
+    assert await repo.purge_incident(inc.id, [alert.id]) is False
     async with engine.connect() as conn:
         for table in ("incidents", "alerts", "evidence", "evidence_blobs", "incident_alerts"):
             assert (await conn.execute(text(f"SELECT count(*) FROM {table}"))).scalar_one() == 0
+
+
+async def test_purge_refuses_extra_or_shared_alerts_and_deletes_nothing(
+    sessions: Sessions, engine: AsyncEngine
+) -> None:
+    alerts, incidents = AlertRepository(sessions), IncidentRepository(sessions)
+    a, b, c = make_alert("fa"), make_alert("fb"), make_alert("fc")
+    for x in (a, b, c):
+        await alerts.insert_if_new(x)
+    inc = await incidents.create(make_incident(alert_ids=[a.id, b.id]))
+    other = await incidents.create(make_incident(alert_ids=[c.id]))
+    repo = EvalRepository(sessions)
+
+    with pytest.raises(PurgeRefusedError, match="not in the recording"):
+        await repo.purge_incident(inc.id, [a.id])  # b is an extra link
+    with pytest.raises(PurgeRefusedError, match="another incident"):
+        await repo.purge_incident(inc.id, [a.id, b.id, c.id])  # c belongs to `other`
+    async with engine.connect() as conn:
+        assert (await conn.execute(text("SELECT count(*) FROM alerts"))).scalar_one() == 3
+        assert (await conn.execute(text("SELECT count(*) FROM incidents"))).scalar_one() == 2
+    assert await incidents.get(other.id) is not None
+
+    assert await repo.purge_incident(inc.id, [a.id, b.id]) is True
+    async with engine.connect() as conn:
+        assert (await conn.execute(text("SELECT id FROM alerts"))).scalar_one() == c.id

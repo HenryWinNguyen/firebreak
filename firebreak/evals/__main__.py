@@ -7,15 +7,21 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from sqlalchemy.engine import make_url
+
+from firebreak.config import Settings
 from firebreak.db.engine import make_engine, make_session_factory
 from firebreak.db.repositories import EvalRepository, SessionFactory
 from firebreak.evals.cassette import DEFAULT_ROOT, SecretInRecordingError
 from firebreak.evals.report import DEFAULT_REPORT, NoRunsError, render_report, write_report
 from firebreak.evals.runner import (
     EvalRunError,
+    EvalSettings,
     RunOutcome,
+    ensure_eval_database,
     record_scenario,
     replay_all,
+    require_eval_database_name,
     require_live_env,
     scenario_key,
     select_scenarios,
@@ -29,7 +35,12 @@ SCENARIOS_DIR = Path("evals/scenarios")
 
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m firebreak.evals")
-    p.add_argument("--database-url", default=None, help="default: FIREBREAK_DATABASE_URL")
+    p.add_argument(
+        "--database-url",
+        default=None,
+        help="eval database (name must end _eval or _test); default FIREBREAK_EVAL_DATABASE_URL, "
+        "else the dev server's firebreak_eval",
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
     run = sub.add_parser("run", help="run the agent over recorded scenarios and store results")
     run.add_argument("--mode", choices=["replay", "record"], required=True)
@@ -55,13 +66,21 @@ def _names(raw: str) -> list[str]:
     return [n.strip() for n in raw.split(",") if n.strip()]
 
 
+def _eval_url(args: argparse.Namespace) -> str:
+    url: str = args.database_url or EvalSettings().resolved_database_url()
+    require_eval_database_name(make_url(url).database)
+    return url
+
+
 async def _run(args: argparse.Namespace) -> int:
     if args.agent != "baseline":
         raise EvalRunError(f"unknown agent {args.agent!r}; only 'baseline' exists until M5")
     if args.mode == "record":
         require_live_env()  # fail before touching anything
     scenarios = select_scenarios(load_scenarios(args.scenarios_dir), _names(args.scenarios))
-    engine = make_engine(args.database_url)
+    url = _eval_url(args)
+    await ensure_eval_database(url)
+    engine = make_engine(url)
     sessions = make_session_factory(engine)
     tools_settings = ToolSettings()
     try:
@@ -119,6 +138,8 @@ async def _record(
     if missing:
         raise EvalRunError(f"record mode needs --incident for {missing} (SCENARIO=INCIDENT_ID)")
     adapters = build_default_adapters(tools_settings)
+    live_engine = make_engine(Settings().database_url)  # read-only: incident + alerts
+    live_sessions = make_session_factory(live_engine)
     outcome = RunOutcome()
     try:
         llm = AnthropicLLMClient(LLMSettings())
@@ -130,6 +151,7 @@ async def _record(
                     agent=args.agent,
                     root=args.recordings_dir,
                     sessions=sessions,
+                    live_sessions=live_sessions,
                     tools_settings=tools_settings,
                     llm=llm,
                     adapters=adapters,
@@ -138,12 +160,13 @@ async def _record(
             )
     finally:
         await adapters.aclose()
+        await live_engine.dispose()
     return outcome
 
 
 async def _report(args: argparse.Namespace) -> int:
     scenarios = load_scenarios(args.scenarios_dir)
-    engine = make_engine(args.database_url)
+    engine = make_engine(_eval_url(args))
     try:
         runs = await EvalRepository(make_session_factory(engine)).latest_run_per_agent()
     finally:
