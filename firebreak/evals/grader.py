@@ -40,10 +40,32 @@ def grade(
     latency_s: float,
     error: str | None,
 ) -> Grade:
-    """Grade one run. A missing report is all-false with the error kept; never raises."""
-    if report is None:
-        return Grade(cost_usd=usage_usd, latency_s=latency_s, error=error)
+    """Grade one run; never raises.
 
+    A missing report is all-false with the error kept (``"no report produced"`` if none given).
+    A malformed report (e.g. built with ``model_construct``) is all-false with an error.
+    Errored runs still count in the accuracy denominators and the percentiles.
+    """
+    if report is None:
+        return Grade(cost_usd=usage_usd, latency_s=latency_s, error=error or "no report produced")
+    try:
+        return _grade_report(scenario, report, evidence_kinds, usage_usd, latency_s, error)
+    except (AttributeError, IndexError, ValueError, TypeError, KeyError) as exc:
+        return Grade(
+            cost_usd=usage_usd,
+            latency_s=latency_s,
+            error=f"malformed report: {type(exc).__name__}: {exc}",
+        )
+
+
+def _grade_report(
+    scenario: Scenario,
+    report: InvestigationReport,
+    evidence_kinds: Mapping[str, EvidenceKind],
+    usage_usd: float,
+    latency_s: float,
+    error: str | None,
+) -> Grade:
     expected = scenario.expect.root_cause_category
     ranked = sorted(report.hypotheses, key=lambda h: h.rank)
     top = ranked[0]
@@ -79,6 +101,7 @@ def _percentile(values: Sequence[float], pct: float) -> float:
 
 
 def summarize(grades: Sequence[Grade]) -> Summary:
+    """Errored runs count in the accuracy denominators and in the percentiles."""
     if not grades:
         raise ValueError("cannot summarize zero grades")
     n = len(grades)

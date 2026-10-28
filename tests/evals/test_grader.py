@@ -20,6 +20,7 @@ def scenario() -> Scenario:
                 "alerts": [{"alertname": "A", "service": "orders"}],
                 "root_cause_category": "bad_deploy",
                 "must_cite_kinds": ["deploy", "metric_series"],
+                "accepted_actions": [{"action": "rollback", "target": "orders"}],
             },
         }
     )
@@ -73,6 +74,32 @@ def test_missing_report_keeps_error() -> None:
     g = run(None, error="boom")
     assert not (g.top1 or g.top3 or g.cited_kinds_ok or g.report_valid)
     assert g.error == "boom"
+
+
+def test_missing_report_without_error_gets_default_error() -> None:
+    g = run(None)
+    assert g.error == "no report produced" and not g.report_valid
+
+
+def test_malformed_report_returns_error_grade() -> None:
+    bad = InvestigationReport.model_construct(
+        findings=[], hypotheses=[Hypothesis.model_construct(rank=1)]
+    )
+    g = run(bad)
+    assert not (g.top1 or g.top3 or g.report_valid)
+    assert g.error is not None and "malformed" in g.error
+
+
+def test_malformed_report_dangling_ref_returns_error_grade() -> None:
+    r = report([C.BAD_DEPLOY])
+    r.hypotheses[0].supporting_findings = ["f99"]
+    g = run(r)
+    assert g.error is not None and not g.report_valid
+
+
+def test_errored_run_counts_in_summary() -> None:
+    s = summarize([run(report([C.BAD_DEPLOY])), run(None, error="x")])
+    assert s.n == 2 and s.top1_accuracy == 0.5 and s.error_count == 1
 
 
 def test_cited_kinds_not_satisfied() -> None:
