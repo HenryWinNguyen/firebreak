@@ -17,11 +17,12 @@ one ``EvalRunError`` naming them, with nothing stored.
 import logging
 import os
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import httpx
 import yaml
 from alembic import command
 from alembic.config import Config
@@ -217,6 +218,8 @@ class ScenarioOutcome:
 @dataclass
 class RunOutcome:
     outcomes: list[ScenarioOutcome] = field(default_factory=list)
+    #: ``(label, message)`` per failed scenario (record mode); a non-empty list fails the run.
+    errors: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def graded(self) -> list[ScenarioOutcome]:
@@ -456,6 +459,37 @@ async def record_scenario(
         )
     kinds = await EvalRepository(sessions).evidence_kinds(incident_id)
     return ScenarioOutcome(scenario.id, _to_result(scenario, result, kinds, result.latency_s))
+
+
+#: Failures of one scenario in record mode that must not abort the others. ``LLMError`` covers
+#: ``ContextOverflowError``; ``SecretInRecordingError`` is deliberately absent (it aborts).
+SCENARIO_ERRORS: tuple[type[Exception], ...] = (
+    EvalRunError,
+    LLMError,
+    TimeoutError,
+    httpx.HTTPError,
+    OSError,
+    DBAPIError,
+)
+
+
+async def record_batch(
+    scenarios: Sequence[Scenario],
+    record_one: Callable[[Scenario], Awaitable[ScenarioOutcome]],
+) -> RunOutcome:
+    """Record every scenario; one scenario's error is logged and reported, the batch continues.
+
+    A leaked secret (``SecretInRecordingError``) and anything not in ``SCENARIO_ERRORS``
+    (including cancellation and ``KeyboardInterrupt``) propagate and abort the batch.
+    """
+    out = RunOutcome()
+    for sc in scenarios:
+        try:
+            out.outcomes.append(await record_one(sc))
+        except SCENARIO_ERRORS as exc:
+            logger.error("scenario %s: record failed: %s", sc.id, exc, exc_info=True)
+            out.errors.append((sc.id, f"{type(exc).__name__}: {exc}"))
+    return out
 
 
 def current_git_sha() -> str | None:
