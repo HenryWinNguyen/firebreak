@@ -1,5 +1,6 @@
 """T-041 baseline tests: scripted fake LLM, fake read registry, real Postgres (db marker)."""
 
+import asyncio
 import json
 import re
 from datetime import timedelta
@@ -12,13 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from firebreak.agents import baseline
 from firebreak.agents.baseline import BaselineResult, build_task, investigate, summary_line
-from firebreak.agents.config import PROMPTS_DIR, load_agent_config
+from firebreak.agents.config import PROMPTS_DIR, load_agent_config, resolve_output_schema
+from firebreak.agents.runtime import build_system_prompt
 from firebreak.db.repositories import (
     AlertRepository,
     IncidentNotFoundError,
     IncidentRepository,
     PostgresEvidenceSink,
 )
+from firebreak.models.agents import AgentRunResult
 from firebreak.models.alert import Alert, AlertSource
 from firebreak.models.common import Severity, utcnow
 from firebreak.models.evidence import EvidenceKind
@@ -185,6 +188,31 @@ def test_prompt_is_generic_and_has_the_required_rules() -> None:
         assert tool in text
 
 
+def test_assembled_system_prompt_has_no_duplicate_headings() -> None:
+    cfg = load_agent_config(baseline.BASELINE_CONFIG, fake_read_registry())
+    system = build_system_prompt(
+        (PROMPTS_DIR / cfg.system_prompt).read_text(), resolve_output_schema(cfg.output_schema)
+    )
+    headings = [line.strip() for line in system.splitlines() if line.startswith("## ")]
+    assert len(headings) == len(set(headings)), headings
+    assert "## Untrusted data" in headings and "## Final answer" in headings
+
+
+def test_summarize_reports_schema_validation_failure() -> None:
+    run = AgentRunResult(
+        agent="baseline",
+        incident_id="inc_x",
+        output={"findings": []},  # violates InvestigationReport (min_length=1)
+        steps=1,
+        tool_calls=[],
+        usage=Usage(),
+        stopped_reason="final_output",
+    )
+    report, error = baseline._summarize(run)
+    assert report is None
+    assert error is not None and "not a valid InvestigationReport" in error
+
+
 def test_build_task_wraps_alert_text_as_untrusted() -> None:
     now = utcnow()
     inc = Incident(
@@ -210,7 +238,9 @@ def test_build_task_wraps_alert_text_as_untrusted() -> None:
     assert task.lower().count("</untrusted-data nonce=") == 1
 
 
-def test_summary_line_and_cli_exit_codes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_summary_line_and_cli_exit_codes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     failed = BaselineResult(
         incident_id="inc_x",
         report=None,
@@ -228,6 +258,7 @@ def test_summary_line_and_cli_exit_codes(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(baseline, "investigate", fake_failed)
     monkeypatch.setattr("firebreak.llm.client.build_llm_client", lambda: ScriptedLLM([]))
     assert baseline.main(["inc_x"]) == 1
+    assert "error: run stopped without a report: budget" in capsys.readouterr().err
 
     report = InvestigationReport.model_validate_json(report_for(["ev_1"]))
     ok = BaselineResult("inc_x", report, Usage(cost_usd=0.1), 2, 0.5, "final_output")
@@ -325,6 +356,16 @@ async def test_budget_exceeded(sessions: Sessions) -> None:
 
 
 @pytest.mark.db
+async def test_max_steps_exhausted(sessions: Sessions) -> None:
+    inc = await seed(sessions)
+    script = [tool_response(*CALLS)] * 16
+    result, llm = await run(sessions, inc.id, script)
+    assert result.stopped_reason == "max_steps" and result.report is None
+    assert result.error is not None and "max_steps" in result.error
+    assert len(llm.requests) == 16 and not result.ok
+
+
+@pytest.mark.db
 async def test_incident_not_found(sessions: Sessions) -> None:
     llm = ScriptedLLM([])
     with pytest.raises(IncidentNotFoundError):
@@ -375,3 +416,56 @@ async def test_default_adapters_are_closed(
         )
         assert not result.ok and result.error is not None and "refused" in result.error
     assert _Closeable.closed == 3
+
+
+@pytest.mark.db
+async def test_adapters_closed_on_cancellation(
+    sessions: Sessions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inc = await seed(sessions)
+    _Closeable.closed = 0
+    fake = ReadAdapters(
+        metrics=_Closeable(),  # type: ignore[arg-type]
+        logs=_Closeable(),  # type: ignore[arg-type]
+        deploys=_Closeable(),  # type: ignore[arg-type]
+        graph=None,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(baseline, "build_default_adapters", lambda settings: fake)
+    started = asyncio.Event()
+
+    class Hang:
+        async def complete(self, request: LLMRequest) -> LLMResponse:
+            started.set()
+            await asyncio.sleep(60)
+            raise AssertionError("unreachable")
+
+    task = asyncio.create_task(
+        investigate(inc.id, llm=Hang(), sessions=sessions, tools_settings=ToolSettings())
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _Closeable.closed == 3
+
+
+class _BadClose(_Closeable):
+    async def aclose(self) -> None:
+        raise OSError("close failed")
+
+
+@pytest.mark.db
+async def test_aclose_failure_does_not_mask_the_run_error(
+    sessions: Sessions, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    inc = await seed(sessions)
+    fake = ReadAdapters(
+        metrics=_BadClose(),  # type: ignore[arg-type]
+        logs=_Closeable(),  # type: ignore[arg-type]
+        deploys=_Closeable(),  # type: ignore[arg-type]
+        graph=None,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(baseline, "build_default_adapters", lambda settings: fake)
+    with pytest.raises(ConnectionError, match="provider down"):
+        await investigate(inc.id, llm=_Down(), sessions=sessions, tools_settings=ToolSettings())
+    assert "closing read adapters failed" in caplog.text

@@ -23,7 +23,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from pydantic import ValidationError
-from sqlalchemy import select
 
 from firebreak.agents.config import CONFIGS_DIR, load_agent_config
 from firebreak.agents.runtime import run_agent
@@ -33,10 +32,9 @@ from firebreak.db.repositories import (
     PostgresEvidenceSink,
     SessionFactory,
 )
-from firebreak.db.tables import AlertRow, IncidentAlertRow
+from firebreak.ingest.service_graph import ServiceGraph
 from firebreak.models.agents import AgentRunResult, ToolCallRecord
-from firebreak.models.alert import Alert, AlertSource, AlertStatus
-from firebreak.models.common import Severity
+from firebreak.models.alert import Alert
 from firebreak.models.incident import Incident
 from firebreak.models.llm import LLMClient, Usage
 from firebreak.models.reasoning import InvestigationReport
@@ -68,38 +66,6 @@ class BaselineResult:
     @property
     def ok(self) -> bool:
         return self.report is not None and self.error is None
-
-
-async def _load_alerts(sessions: SessionFactory, incident: Incident) -> list[Alert]:
-    async with sessions() as session:
-        rows = (
-            (
-                await session.execute(
-                    select(AlertRow)
-                    .join(IncidentAlertRow, IncidentAlertRow.alert_id == AlertRow.id)
-                    .where(IncidentAlertRow.incident_id == incident.id)
-                    .order_by(AlertRow.started_at, AlertRow.id)
-                )
-            )
-            .scalars()
-            .all()
-        )
-    return [
-        Alert(
-            id=r.id,
-            source=AlertSource(r.source),
-            fingerprint=r.fingerprint,
-            alertname=r.alertname,
-            service=r.service,
-            severity=Severity(r.severity),
-            status=AlertStatus(r.status),
-            summary=r.summary,
-            labels=dict(r.labels),
-            started_at=r.started_at,
-            ended_at=r.ended_at,
-        )
-        for r in rows
-    ]
 
 
 def _iso(dt: datetime) -> str:
@@ -155,12 +121,15 @@ async def investigate(
     incident = await IncidentRepository(sessions).get(incident_id)
     if incident is None:
         raise IncidentNotFoundError(incident_id)
-    alerts = await _load_alerts(sessions, incident)
+    alerts = await IncidentRepository(sessions).list_alerts(incident.id)
 
     adapters: ReadAdapters | None = None
     started = time.perf_counter()
     try:
         if registry is None:
+            # build_default_adapters creates the HTTP clients first and loads the graph last.
+            # Load the graph up front so a failure there can't leak already-built clients.
+            ServiceGraph.load()
             adapters = build_default_adapters(tools_settings)
             registry = build_read_registry(tools_settings, adapters)
         cfg = load_agent_config(BASELINE_CONFIG, registry)
@@ -168,7 +137,11 @@ async def investigate(
         run = await run_agent(cfg, build_task(incident, alerts), ctx, llm, ToolGateway(registry))
     finally:
         if adapters is not None:
-            await adapters.aclose()
+            try:
+                await adapters.aclose()
+            except Exception:
+                # Never mask the exception (or result) of the run itself.
+                logger.exception("closing read adapters failed incident=%s", incident.id)
     latency_s = time.perf_counter() - started
 
     report, error = _summarize(run)
@@ -216,6 +189,8 @@ async def _amain(incident_id: str) -> int:
         await engine.dispose()
     if result.report is not None:
         print(result.report.model_dump_json(indent=2))
+    if result.error is not None:
+        print(f"error: {result.error}", file=sys.stderr)
     print(summary_line(result))
     return 0 if result.ok else 1
 
