@@ -306,9 +306,13 @@ class ToolGateway:
     @staticmethod
     def _handler_refused(tool: RegisteredTool, e: ToolError) -> ToolError:
         """A ToolError raised by a handler: its code and text are not trusted."""
-        cls: type[ToolError] = (
-            InvalidToolArgs if isinstance(e, InvalidToolArgs) else ToolHandlerFailed
-        )
+        cls: type[ToolError]
+        if isinstance(e, InvalidToolArgs):
+            cls = InvalidToolArgs
+        elif isinstance(e, ToolTimeout):
+            cls = ToolTimeout  # a backend timeout reaches the model as `timeout`
+        else:
+            cls = ToolHandlerFailed
         text = getattr(e, "message", None) or str(e)
         extra = getattr(e, "untrusted_detail", None)
         detail = "\n".join(x for x in (text, extra) if isinstance(x, str) and x)

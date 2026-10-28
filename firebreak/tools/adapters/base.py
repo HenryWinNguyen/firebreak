@@ -8,8 +8,9 @@ isn't in the adapter's exact allowlist, whatever the calling code does. Redirect
 are never followed.
 """
 
+import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 import httpx
@@ -19,6 +20,18 @@ from firebreak.tools.errors import ToolHandlerFailed, ToolTimeout, cap_text
 logger = logging.getLogger(__name__)
 
 _MAX_DETAIL_CHARS = 500
+#: Hard cap on a backend response body (checked before parsing).
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
+    scheme = url.scheme.lower()
+    return (scheme, url.host.lower(), url.port or _DEFAULT_PORTS.get(scheme))
+
+
+def _reject_constant(name: str) -> Any:
+    raise ValueError(f"non-standard JSON constant {name}")
 
 
 class BackendError(ToolHandlerFailed):
@@ -38,15 +51,28 @@ class ForbiddenRequest(ToolHandlerFailed):
 
 
 class _GuardTransport(httpx.AsyncBaseTransport):
-    def __init__(self, inner: httpx.AsyncBaseTransport, allowed_paths: frozenset[str]) -> None:
+    def __init__(
+        self,
+        inner: httpx.AsyncBaseTransport,
+        allowed_paths: frozenset[str],
+        allowed_origins: frozenset[tuple[str, str, int | None]],
+    ) -> None:
         self._inner = inner
         self._allowed = allowed_paths
+        self._origins = allowed_origins
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         if request.method != "GET":
             raise ForbiddenRequest(f"refused {request.method} request: adapters are GET-only")
-        if request.url.path not in self._allowed:
-            raise ForbiddenRequest(f"refused GET {request.url.path!r}: path is not allowlisted")
+        # raw_path is the still-encoded path plus "?query"; compare the path part only, so
+        # an encoded slash (admin%2Fdeploys) can't alias an allowlisted path.
+        raw_path = request.url.raw_path.split(b"?", 1)[0].decode("ascii", "replace")
+        if raw_path not in self._allowed:
+            raise ForbiddenRequest(f"refused GET {raw_path!r}: path is not allowlisted")
+        if _origin(request.url) not in self._origins:
+            raise ForbiddenRequest(
+                f"refused GET to {request.url.host!r}: host is not the configured backend"
+            )
         return await self._inner.handle_async_request(request)
 
     async def aclose(self) -> None:
@@ -61,14 +87,16 @@ class ReadOnlyClient:
         *,
         backend: str,
         allowed_paths: frozenset[str],
+        base_urls: Iterable[str],
         timeout_s: float,
         headers: Mapping[str, str] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.backend = backend
         inner = transport if transport is not None else httpx.AsyncHTTPTransport()
+        origins = frozenset(_origin(httpx.URL(u)) for u in base_urls)
         self._client = httpx.AsyncClient(
-            transport=_GuardTransport(inner, allowed_paths),
+            transport=_GuardTransport(inner, allowed_paths, origins),
             timeout=timeout_s,
             headers=dict(headers or {}),
             follow_redirects=False,
@@ -80,7 +108,8 @@ class ReadOnlyClient:
     async def get_json(self, url: str, params: Mapping[str, str] | None = None) -> Any:
         """GET ``url`` and return the parsed JSON body, or raise a typed ``ToolError``."""
         try:
-            resp = await self._client.get(url, params=dict(params or {}))
+            async with self._client.stream("GET", url, params=dict(params or {})) as resp:
+                body = await self._read_capped(resp, url)
         except httpx.TimeoutException as e:
             logger.warning("%s timed out url=%s", self.backend, url)
             raise BackendTimeout(f"{self.backend} did not answer in time") from e
@@ -91,20 +120,38 @@ class ReadOnlyClient:
                 untrusted_detail=str(e),
             ) from e
 
+        text = body.decode("utf-8", errors="replace")
         if not resp.is_success:
             logger.warning("%s HTTP %d url=%s", self.backend, resp.status_code, url)
             raise BackendError(
                 f"{self.backend} returned HTTP {resp.status_code}",
-                untrusted_detail=cap_text(resp.text, _MAX_DETAIL_CHARS),
+                untrusted_detail=cap_text(text, _MAX_DETAIL_CHARS),
             )
         try:
-            return resp.json()
-        except ValueError as e:
-            logger.warning("%s returned non-JSON url=%s", self.backend, url)
+            return json.loads(body, parse_constant=_reject_constant)
+        except ValueError as e:  # includes JSONDecodeError and UnicodeDecodeError
+            logger.warning("%s returned invalid JSON url=%s: %s", self.backend, url, e)
             raise BackendError(
                 f"{self.backend} returned a non-JSON body",
-                untrusted_detail=cap_text(resp.text, _MAX_DETAIL_CHARS),
+                untrusted_detail=cap_text(text, _MAX_DETAIL_CHARS),
             ) from e
+
+    async def _read_capped(self, resp: httpx.Response, url: str) -> bytes:
+        """Read the body, refusing anything over ``MAX_RESPONSE_BYTES`` before it is parsed."""
+        too_large = BackendError(f"{self.backend} response too large; narrow the query")
+        declared = resp.headers.get("content-length")
+        if declared is not None and declared.isdigit() and int(declared) > MAX_RESPONSE_BYTES:
+            logger.warning(
+                "%s response too large (content-length=%s) url=%s", self.backend, declared, url
+            )
+            raise too_large
+        buf = bytearray()
+        async for chunk in resp.aiter_bytes():
+            buf += chunk
+            if len(buf) > MAX_RESPONSE_BYTES:
+                logger.warning("%s response exceeded cap url=%s", self.backend, url)
+                raise too_large
+        return bytes(buf)
 
 
 def check_status(backend: str, body: Any) -> dict[str, Any]:

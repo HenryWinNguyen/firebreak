@@ -234,10 +234,11 @@ def build_read_registry(
         t = now()
         if t.tzinfo is None:
             raise ValueError("clock must return an aware datetime")
-        return t.astimezone(UTC)
+        # Whole seconds, so Evidence.query reproduces the exact window that was requested.
+        return t.astimezone(UTC).replace(microsecond=0)
 
     async def promql_query(args: PromqlQueryArgs, ctx: ToolContext) -> ToolOutput:
-        at = args.at.astimezone(UTC) if args.at is not None else utc_now()
+        at = args.at.astimezone(UTC).replace(microsecond=0) if args.at is not None else utc_now()
         result = await ad.metrics.instant(args.query, at)
         return ToolOutput(
             kind=EvidenceKind.METRIC_SERIES,
