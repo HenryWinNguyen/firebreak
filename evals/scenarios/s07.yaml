@@ -1,0 +1,14 @@
+id: S7
+title: "Traffic spike, no bug"
+setup:
+  chaos: {}  # load only, no flag
+load: {rps: 300, duration_s: 300, cart_size: 1}
+expect:
+  alerts:  # any-of
+    - {alertname: HighLatencyP95, service: orders}
+    - {alertname: DBPoolSaturated, service: orders}
+  root_cause_category: capacity
+  must_cite_kinds: [metric_series]
+  action: scale
+  action_target: orders
+teardown: {reset_chaos: true}

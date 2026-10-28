@@ -1,0 +1,13 @@
+id: S6
+title: "Bad config push: wrong Redis host"
+setup:
+  chaos: {orders.redis_host: redis-wrong}
+load: {rps: 50, duration_s: 300, cart_size: 1}
+expect:
+  alerts:  # any-of
+    - {alertname: HighErrorRate, service: orders}
+  root_cause_category: misconfiguration
+  must_cite_kinds: [config, log_lines]
+  action: revert_config
+  action_target: orders
+teardown: {reset_chaos: true}

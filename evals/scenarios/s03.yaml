@@ -1,0 +1,14 @@
+id: S3
+title: "N+1 query regression"
+setup:
+  chaos: {orders.n_plus_one: true}
+load: {rps: 50, duration_s: 300, cart_size: 1}
+expect:
+  alerts:  # any-of
+    - {alertname: HighLatencyP95, service: orders}
+  root_cause_category: slow_query
+  must_cite_kinds: [trace, metric_series]
+  # SCOPE: roll back or disable the feature flag; toggle_flag is the graded action.
+  action: toggle_flag
+  action_target: orders
+teardown: {reset_chaos: true}

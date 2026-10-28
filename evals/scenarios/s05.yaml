@@ -1,0 +1,14 @@
+id: S5
+title: "Memory leak leading to OOM restarts"
+setup:
+  chaos: {orders.leak_kb_per_request: 512}
+load: {rps: 50, duration_s: 600, cart_size: 1}
+expect:
+  alerts:  # any-of
+    - {alertname: HighMemory, service: orders}
+  root_cause_category: memory_leak
+  must_cite_kinds: [metric_series]
+  # SCOPE: restart now, roll back after; restart is the graded (immediate) action.
+  action: restart
+  action_target: orders
+teardown: {reset_chaos: true}

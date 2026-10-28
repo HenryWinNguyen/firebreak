@@ -1,0 +1,14 @@
+id: S1
+title: "Bad deploy: orders returns 500 on 10% of requests"
+setup:
+  chaos: {orders.error_rate: 0.1}
+  deploy: {service: orders, version: v1.4.2-bad}
+load: {rps: 50, duration_s: 300, cart_size: 1}
+expect:
+  alerts:  # any-of
+    - {alertname: HighErrorRate, service: orders}
+  root_cause_category: bad_deploy
+  must_cite_kinds: [deploy, metric_series]
+  action: rollback
+  action_target: orders
+teardown: {reset_chaos: true}
