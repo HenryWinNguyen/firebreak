@@ -873,3 +873,24 @@ async def test_replay_fails_when_recorded_tool_calls_are_not_consumed(tmp_path: 
     ):
         pass  # the run makes no adapter calls at all
     assert ei.value.step == "tool call 1"
+
+
+def test_default_secrets_includes_the_openai_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    from firebreak.evals.cassette import default_secrets
+
+    key = "sk-openai-compat-0123456789abcdef"
+    monkeypatch.delenv("FIREBREAK_LLM_OPENAI_API_KEY", raising=False)
+    assert key not in default_secrets()
+    monkeypatch.setenv("FIREBREAK_LLM_OPENAI_API_KEY", key)
+    assert key in default_secrets()
+
+
+def test_recording_containing_the_openai_key_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from firebreak.evals.cassette import default_secrets
+
+    key = "sk-openai-compat-0123456789abcdef"
+    monkeypatch.setenv("FIREBREAK_LLM_OPENAI_API_KEY", key)
+    (tmp_path / "tools.jsonl").write_text(json.dumps({"x": key}) + "\n")
+    assert find_secrets(tmp_path, default_secrets()) == [tmp_path / "tools.jsonl"]

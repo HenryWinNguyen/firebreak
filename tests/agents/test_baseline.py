@@ -257,6 +257,8 @@ def test_summary_line_and_cli_exit_codes(
 
     monkeypatch.setattr(baseline, "investigate", fake_failed)
     monkeypatch.setattr("firebreak.llm.client.build_llm_client", lambda: ScriptedLLM([]))
+    monkeypatch.setenv("FIREBREAK_EVAL_LIVE", "1")  # the spend gate (T-048)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
     assert baseline.main(["inc_x"]) == 1
     assert "error: run stopped without a report: budget" in capsys.readouterr().err
 
@@ -469,3 +471,84 @@ async def test_aclose_failure_does_not_mask_the_run_error(
     with pytest.raises(ConnectionError, match="provider down"):
         await investigate(inc.id, llm=_Down(), sessions=sessions, tools_settings=ToolSettings())
     assert "closing read adapters failed" in caplog.text
+
+
+# --- T-048 spend gate -----------------------------------------------------------------------
+
+
+def _no_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a: Any, **kw: Any) -> None:
+        raise AssertionError("an Anthropic client was constructed")
+
+    monkeypatch.setattr("anthropic.AsyncAnthropic.__init__", boom)
+
+
+def _stub_run(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    seen: list[Path] = []
+    report = InvestigationReport.model_validate_json(report_for(["ev_1"]))
+    ok = BaselineResult("inc_x", report, Usage(cost_usd=0.0), 1, 0.1, "final_output")
+
+    async def fake(*a: Any, **kw: Any) -> BaselineResult:
+        seen.append(kw["config_path"])
+        return ok
+
+    monkeypatch.setattr(baseline, "investigate", fake)
+    monkeypatch.setattr("firebreak.llm.client.build_llm_client", lambda: ScriptedLLM([]))
+    return seen
+
+
+def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in ("FIREBREAK_EVAL_LIVE", "ANTHROPIC_API_KEY", "FIREBREAK_LLM_MODE"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_cli_refuses_anthropic_agent_without_opt_in(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _clean_env(monkeypatch)
+    _no_client(monkeypatch)
+    seen = _stub_run(monkeypatch)
+    assert baseline.main(["inc_x"]) == 2
+    assert "FIREBREAK_EVAL_LIVE" in capsys.readouterr().err
+    assert seen == []  # never got as far as running
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")  # a key alone is not an opt-in
+    assert baseline.main(["inc_x"]) == 2
+
+
+def test_cli_allowed_with_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clean_env(monkeypatch)
+    _no_client(monkeypatch)
+    seen = _stub_run(monkeypatch)
+    monkeypatch.setenv("FIREBREAK_EVAL_LIVE", "1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    assert baseline.main(["inc_x"]) == 0
+    assert seen[0].stem == "baseline"
+    monkeypatch.delenv("ANTHROPIC_API_KEY")  # opted in but no key: still refused
+    assert baseline.main(["inc_x"]) == 2
+
+
+def test_cli_replay_needs_no_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clean_env(monkeypatch)
+    _no_client(monkeypatch)
+    seen = _stub_run(monkeypatch)
+    monkeypatch.setenv("FIREBREAK_LLM_MODE", "replay")
+    assert baseline.main(["inc_x"]) == 0
+    assert len(seen) == 1
+
+
+def test_cli_local_agent_needs_no_anthropic_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clean_env(monkeypatch)
+    _no_client(monkeypatch)
+    seen = _stub_run(monkeypatch)
+    monkeypatch.setenv("FIREBREAK_EVAL_LIVE", "1")  # no ANTHROPIC_API_KEY
+    assert baseline.main(["inc_x", "--agent", "baseline-local"]) == 0
+    assert seen[0].stem == "baseline-local"
+
+
+def test_cli_unknown_agent_is_refused(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _clean_env(monkeypatch)
+    _stub_run(monkeypatch)
+    assert baseline.main(["inc_x", "--agent", "nope"]) == 2
+    assert "unknown agent" in capsys.readouterr().err
