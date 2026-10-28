@@ -11,6 +11,7 @@ milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 - **Spend:** each investigation is hard-capped at $0.50 (`budget_usd`), so a full S1–S7 run is ≤ $3.50; ≤ 1 re-run planned (≤ $7 total).
 - **Options:** (a) go as specced (Sonnet 5.5, Haiku 5.5 fallback); (b) a cheaper smoke run first (S1 only, ≤ $0.50); (c) hold.
 - **Recommendation:** (b) then (a): one scenario confirms the wiring end to end before spending on all seven.
+- **Timing:** the full run should happen after T-044/T-045 (record/replay), so the recordings can be replayed for $0 in CI. A $0.50 S1 smoke run can happen any time.
 - **Not blocked meanwhile:** M4 eval-harness work that runs on replay fixtures (no spend) continues.
 
 ## Current status

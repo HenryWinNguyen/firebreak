@@ -22,7 +22,10 @@
 | T-034 | Read tools (Prometheus, Loki, deploys, service graph) | agents | sonnet | T-032 | merged | #28 |
 | T-035 | Read-tool hardening (T-034 minors) | agents | sonnet | T-034 | merged | #31 |
 | T-041 | Single-agent baseline (config, prompt, runner, CLI) | agents | sonnet | T-033, T-034 | merged | #32 |
-| T-042 | M3 acceptance: live S1–S7 (**paid, needs Henry**) | evals | sonnet | T-014, T-041 | **waiting on Henry** |  |
+| T-042 | M3 acceptance: live S1–S7 (**paid, needs Henry**) | evals | sonnet | T-014, T-041, T-044, T-045 | **waiting on Henry** |  |
+| T-043 | Eval scenarios S1–S7 + deterministic grader | evals | sonnet | T-041 | in-progress | |
+| T-044 | Record/replay cassettes (tools + LLM, deterministic) | evals | **opus** (high risk) | T-041 | in-progress | |
+| T-045 | Eval runner, results tables, `make eval`, REPORT.md | evals | sonnet | T-043, T-044 | pending | |
 
 ```
 T-011 ─► T-012 ─┐

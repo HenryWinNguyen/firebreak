@@ -558,7 +558,7 @@ firebreak/
 │   ├── models/      Pydantic schemas + SQLAlchemy models
 │   └── telemetry/   OTel + Prometheus setup
 ├── shopfloor/       target services (gateway, orders, inventory) + chaos admin API
-├── evals/           scenarios/*.yaml, harness, graders, fixtures/, REPORT.md
+├── evals/           scenarios/*.yaml, recordings/, REPORT.md (harness code: firebreak/evals/, typed)
 ├── dashboard/       Next.js
 ├── ops/             prometheus.yml, alert rules, loki/tempo config, grafana json
 ├── docker-compose.yml

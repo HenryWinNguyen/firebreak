@@ -35,3 +35,6 @@ down:
 
 logs:
 	docker compose logs -f --tail=100
+
+eval:  ## Replay-mode evals over recorded scenarios ($0)
+	uv run python -m firebreak.evals run --mode replay --agent baseline && uv run python -m firebreak.evals report
