@@ -10,24 +10,34 @@ are never followed.
 
 import json
 import logging
+import math
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 import httpx
 
-from firebreak.tools.errors import ToolHandlerFailed, ToolTimeout, cap_text
+from firebreak.tools.errors import ToolHandlerFailed, cap_text
 
 logger = logging.getLogger(__name__)
 
 _MAX_DETAIL_CHARS = 500
 #: Hard cap on a backend response body (checked before parsing).
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+#: The decompressed body is read in pieces this big, checking the cap after each.
+_READ_PIECE_BYTES = 64 * 1024
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
 def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
     scheme = url.scheme.lower()
     return (scheme, url.host.lower(), url.port or _DEFAULT_PORTS.get(scheme))
+
+
+def _parse_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):  # e.g. 1e999 -> inf, which json.dumps would write as Infinity
+        raise ValueError(f"non-finite number {text[:20]!r}")
+    return value
 
 
 def _reject_constant(name: str) -> Any:
@@ -42,8 +52,12 @@ class BackendUnavailable(ToolHandlerFailed):
     """The backend couldn't be reached (connection refused, DNS, protocol error)."""
 
 
-class BackendTimeout(ToolTimeout):
-    """The backend didn't answer within the HTTP timeout."""
+class BackendTimeout(ToolHandlerFailed):
+    """The backend didn't answer within the HTTP timeout.
+
+    Deliberately not a ``ToolTimeout`` subclass: the gateway maps exactly this type to the
+    ``timeout`` code, so no other handler-raised error can claim it.
+    """
 
 
 class ForbiddenRequest(ToolHandlerFailed):
@@ -128,7 +142,7 @@ class ReadOnlyClient:
                 untrusted_detail=cap_text(text, _MAX_DETAIL_CHARS),
             )
         try:
-            return json.loads(body, parse_constant=_reject_constant)
+            return json.loads(body, parse_constant=_reject_constant, parse_float=_parse_float)
         except ValueError as e:  # includes JSONDecodeError and UnicodeDecodeError
             logger.warning("%s returned invalid JSON url=%s: %s", self.backend, url, e)
             raise BackendError(
@@ -146,7 +160,7 @@ class ReadOnlyClient:
             )
             raise too_large
         buf = bytearray()
-        async for chunk in resp.aiter_bytes():
+        async for chunk in resp.aiter_bytes(chunk_size=_READ_PIECE_BYTES):
             buf += chunk
             if len(buf) > MAX_RESPONSE_BYTES:
                 logger.warning("%s response exceeded cap url=%s", self.backend, url)

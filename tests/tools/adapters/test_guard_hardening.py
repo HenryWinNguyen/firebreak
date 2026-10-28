@@ -90,3 +90,25 @@ async def test_bare_nonfinite_json_literals_are_rejected(literal: str) -> None:
 
     with pytest.raises(BackendError):
         await PrometheusAdapter("http://p", timeout_s=1, transport=transport(h)).instant("x", T0)
+
+
+async def test_float_overflow_literal_is_rejected() -> None:
+    def h(req: httpx.Request) -> httpx.Response:
+        body = b'{"status":"success","data":{"resultType":"scalar","result":[1,1e999]}}'
+        return httpx.Response(200, content=body)
+
+    with pytest.raises(BackendError):
+        await PrometheusAdapter("http://p", timeout_s=1, transport=transport(h)).instant("x", T0)
+
+
+async def test_highly_compressible_body_hits_the_cap_in_bounded_pieces() -> None:
+    import gzip
+
+    payload = gzip.compress(b"0" * (MAX_RESPONSE_BYTES * 8))  # tiny on the wire, 32 MB decoded
+    assert len(payload) < 1024 * 1024
+
+    def h(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-encoding": "gzip"}, content=payload)
+
+    with pytest.raises(BackendError, match="response too large; narrow the query"):
+        await PrometheusAdapter("http://p", timeout_s=1, transport=transport(h)).metric_names()

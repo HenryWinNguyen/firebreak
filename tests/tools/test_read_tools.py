@@ -593,3 +593,32 @@ def test_downsampling_is_deterministic() -> None:
 
 def _hms_of(ts: float) -> str:
     return datetime.fromtimestamp(ts, UTC).strftime("%H:%M:%SZ")
+
+
+async def test_float_overflow_in_backend_body_is_a_handler_error(sink: FakeEvidenceSink) -> None:
+    def h(req: httpx.Request) -> httpx.Response:
+        body = b'{"status":"success","data":{"resultType":"scalar","result":[1,1e999]}}'
+        return httpx.Response(200, content=body)
+
+    r = await call(_gw_with(h, lambda: NOW), sink, "promql_query", {"query": "up"})
+    assert r.is_error and r.error_code is ToolErrorCode.HANDLER_FAILED
+    assert sink.stored == {}
+
+
+async def test_raw_blob_serialization_refuses_nan(sink: FakeEvidenceSink) -> None:
+    from firebreak.tools.adapters.prometheus import MetricResult
+
+    class NanMetrics:
+        async def instant(self, query: str, at: datetime) -> MetricResult:
+            return MetricResult("scalar", [], raw={"v": float("inf")})
+
+    t = httpx.MockTransport(Backend())
+    ad = ReadAdapters(
+        metrics=NanMetrics(),  # type: ignore[arg-type]
+        logs=LokiAdapter("http://l", timeout_s=1, transport=t),
+        deploys=ShopfloorAdapter({}, admin_token="t", timeout_s=1, transport=t),
+        graph=ServiceGraph.load(),
+    )
+    gw = ToolGateway(build_read_registry(ToolSettings(), ad, clock=lambda: NOW))
+    r = await call(gw, sink, "promql_query", {"query": "up"})
+    assert r.is_error and sink.stored == {}  # never stored as bare Infinity
