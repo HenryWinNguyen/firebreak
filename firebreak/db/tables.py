@@ -1,8 +1,22 @@
 """SQLAlchemy tables. Rows map 1:1 to the contracts in ``firebreak/models/``."""
 
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, MetaData, String, Text, func, text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    MetaData,
+    Numeric,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -88,3 +102,37 @@ class EvidenceBlobRow(Base):
     key: Mapped[str] = mapped_column(Text, primary_key=True)
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TSTZ, server_default=func.now())
+
+
+class EvalRunRow(Base):
+    """One invocation of the eval runner (ARCH §9, §13)."""
+
+    __tablename__ = "eval_runs"
+    __table_args__ = (Index("ix_eval_runs_agent_started_at", "agent", "started_at"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(TSTZ)
+    mode: Mapped[str] = mapped_column(String)
+    agent: Mapped[str] = mapped_column(String)
+    git_sha: Mapped[str | None] = mapped_column(String, nullable=True)
+    prompt_sha256: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class EvalResultRow(Base):
+    """One graded scenario inside an eval run."""
+
+    __tablename__ = "eval_results"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("eval_runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    scenario_id: Mapped[str] = mapped_column(String, primary_key=True)
+    top1: Mapped[bool] = mapped_column(Boolean)
+    top3: Mapped[bool] = mapped_column(Boolean)
+    cited_kinds_ok: Mapped[bool] = mapped_column(Boolean)
+    report_valid: Mapped[bool] = mapped_column(Boolean)
+    cost_usd: Mapped[float] = mapped_column(Numeric(12, 6, asdecimal=False))
+    latency_s: Mapped[float] = mapped_column(Float)
+    steps: Mapped[int] = mapped_column(Integer)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    report: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

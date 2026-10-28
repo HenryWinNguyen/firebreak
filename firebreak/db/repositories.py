@@ -8,14 +8,20 @@ the ``*_in`` method, and the plain method is a thin wrapper around it.
 Datetimes passed to any method must be timezone-aware (``ValueError`` otherwise).
 """
 
+from collections.abc import Sequence
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import func, select, update
+from pydantic import BaseModel
+from sqlalchemy import delete, func, select, update
+from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from firebreak.db.tables import (
     AlertRow,
+    EvalResultRow,
+    EvalRunRow,
     EvidenceBlobRow,
     EvidenceRow,
     IncidentAlertRow,
@@ -37,6 +43,10 @@ class IncidentNotFoundError(PersistenceError):
     def __init__(self, incident_id: str) -> None:
         super().__init__(f"incident not found: {incident_id}")
         self.incident_id = incident_id
+
+
+class PurgeRefusedError(PersistenceError):
+    """A purge would delete rows the caller did not name."""
 
 
 class AlertNotFoundError(PersistenceError):
@@ -466,3 +476,181 @@ class PostgresEvidenceSink:
                 raw_ref=row.raw_ref,
                 untrusted=row.untrusted,
             )
+
+
+class EvalRun(BaseModel):
+    id: str
+    started_at: datetime
+    mode: str
+    agent: str
+    git_sha: str | None = None
+    prompt_sha256: str | None = None
+
+
+class EvalResult(BaseModel):
+    scenario_id: str
+    top1: bool
+    top3: bool
+    cited_kinds_ok: bool
+    report_valid: bool
+    cost_usd: float
+    latency_s: float
+    steps: int
+    error: str | None = None
+    report: dict[str, Any] | None = None
+
+
+class EvalRepository:
+    """Eval runs and results, plus the helpers a replay needs to start from a clean slate."""
+
+    def __init__(self, sessions: SessionFactory) -> None:
+        self._sessions = sessions
+
+    async def save_run(self, run: EvalRun, results: list[EvalResult]) -> None:
+        """Insert the run and all its results in one transaction."""
+        _require_aware(started_at=run.started_at)
+        async with self._sessions() as session, session.begin():
+            session.add(EvalRunRow(**run.model_dump()))
+            await session.flush()
+            session.add_all(EvalResultRow(run_id=run.id, **r.model_dump()) for r in results)
+
+    async def get_run(self, run_id: str) -> tuple[EvalRun, list[EvalResult]] | None:
+        async with self._sessions() as session:
+            row = await session.get(EvalRunRow, run_id)
+            if row is None:
+                return None
+            return await self._with_results(session, row)
+
+    async def latest_run_per_agent(self) -> list[tuple[EvalRun, list[EvalResult]]]:
+        """The newest run of each agent (by ``started_at``, then id), ordered by agent name."""
+        async with self._sessions() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(EvalRunRow)
+                        .ext(distinct_on(EvalRunRow.agent))
+                        .order_by(
+                            EvalRunRow.agent, EvalRunRow.started_at.desc(), EvalRunRow.id.desc()
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [await self._with_results(session, r) for r in rows]
+
+    @staticmethod
+    async def _with_results(
+        session: AsyncSession, row: EvalRunRow
+    ) -> tuple[EvalRun, list[EvalResult]]:
+        results = (
+            (
+                await session.execute(
+                    select(EvalResultRow)
+                    .where(EvalResultRow.run_id == row.id)
+                    .order_by(EvalResultRow.scenario_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        run = EvalRun(
+            id=row.id,
+            started_at=row.started_at,
+            mode=row.mode,
+            agent=row.agent,
+            git_sha=row.git_sha,
+            prompt_sha256=row.prompt_sha256,
+        )
+        return run, [
+            EvalResult(
+                scenario_id=r.scenario_id,
+                top1=r.top1,
+                top3=r.top3,
+                cited_kinds_ok=r.cited_kinds_ok,
+                report_valid=r.report_valid,
+                cost_usd=r.cost_usd,
+                latency_s=r.latency_s,
+                steps=r.steps,
+                error=r.error,
+                report=r.report,
+            )
+            for r in results
+        ]
+
+    async def evidence_kinds(self, incident_id: str) -> dict[str, EvidenceKind]:
+        """Evidence id -> kind for one incident (what the grader needs)."""
+        async with self._sessions() as session:
+            rows = await session.execute(
+                select(EvidenceRow.id, EvidenceRow.kind).where(
+                    EvidenceRow.incident_id == incident_id
+                )
+            )
+            return {r.id: EvidenceKind(r.kind) for r in rows}
+
+    async def purge_incident(self, incident_id: str, alert_ids: Sequence[str]) -> bool:
+        """Delete one incident, its evidence (and blobs) and exactly ``alert_ids``.
+
+        Returns False if there was nothing to delete. Raises ``PurgeRefusedError``, with no
+        deletes, if the stored incident is linked to any alert outside ``alert_ids`` or if any
+        of ``alert_ids`` is linked to another incident.
+        """
+        allowed = set(alert_ids)
+        async with self._sessions() as session, session.begin():
+            linked = set(
+                (
+                    await session.execute(
+                        select(IncidentAlertRow.alert_id).where(
+                            IncidentAlertRow.incident_id == incident_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            extra = sorted(linked - allowed)
+            if extra:
+                raise PurgeRefusedError(
+                    f"incident {incident_id} has alerts not in the recording: {extra}"
+                )
+            shared = sorted(
+                (
+                    await session.execute(
+                        select(IncidentAlertRow.alert_id).where(
+                            IncidentAlertRow.alert_id.in_(allowed),
+                            IncidentAlertRow.incident_id != incident_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if shared:
+                raise PurgeRefusedError(
+                    f"alerts {shared} are linked to another incident; refusing to delete them"
+                )
+            exists = await session.get(IncidentRow, incident_id) is not None
+            present_alerts = (
+                (await session.execute(select(AlertRow.id).where(AlertRow.id.in_(allowed))))
+                .scalars()
+                .all()
+            )
+            if not exists and not present_alerts:
+                return False
+            raw_refs = (
+                (
+                    await session.execute(
+                        select(EvidenceRow.raw_ref).where(EvidenceRow.incident_id == incident_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            await session.execute(delete(IncidentRow).where(IncidentRow.id == incident_id))
+            if raw_refs:
+                await session.execute(
+                    delete(EvidenceBlobRow).where(EvidenceBlobRow.key.in_(raw_refs))
+                )
+            if present_alerts:
+                await session.execute(delete(AlertRow).where(AlertRow.id.in_(present_alerts)))
+        return True
