@@ -8,8 +8,8 @@ milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 **Decision (Henry, 2026-10-28):** keep the Claude path working but **don't spend for now**. The paid Claude run
 (T-042) is **optional/deferred**; nothing else is blocked on it. CP1 uses same-model scores from the free local model.
 
-- **Needs from you:** `brew install ollama`, then `ollama serve` (separate terminal, keeps running), then
-  `ollama pull qwen3:8b` (~5 GB). Tell the lead when done.
+- **Needs from you:** Ollama is installed and `qwen3:8b` is pulled. Restart the server with a 32k context:
+  `OLLAMA_CONTEXT_LENGTH=32768 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 ollama serve`. Tell the lead when done.
 - **Then the lead runs (T-049, $0):** the `FIREBREAK_OLLAMA=1` integration test once, then
   `python -m firebreak.evals run --mode record --agent baseline-local` on S1–S7, then `make eval` → REPORT.md.
 - **If you decide to pay later:** $5 prepaid Console credits (auto-reload off), key in `.env`, and a go-ahead at
@@ -25,6 +25,12 @@ Repo: https://github.com/HenryWinNguyen/firebreak (public).
 ## Log
 
 ### 2026-10-28: M4 eval harness
+- **T-050** (#56): Ollama silently truncates prompts beyond `OLLAMA_CONTEXT_LENGTH` (default 4096). The
+  OpenAI-compatible client now refuses a prompt that can't fit (`FIREBREAK_LLM_OPENAI_CONTEXT_TOKENS`, default 32768,
+  must match the server) and raises `ContextOverflowError` when reply usage shows near-full context; never retried,
+  never falls back. Lead added a warning when a reply carries no usage. Henry installed Ollama; `qwen3:8b` pulled.
+  Note: an LLM error aborts the whole record run (not just the scenario), so local runs go one scenario at a time.
+  Backlog: record a per-scenario error and continue instead.
 - **T-048** (#53): spend gate. `python -m firebreak.agents.baseline [--agent NAME]` refuses (exit 2, before any client,
   engine or adapter is built) unless `FIREBREAK_EVAL_LIVE=1`, plus `ANTHROPIC_API_KEY` when the config routes to
   Anthropic; replay is exempt. The OpenAI-compatible key is now in the recording secret scan. No remaining path
