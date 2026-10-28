@@ -11,16 +11,17 @@
 | T-015 | Observability follow-ups (T-013 minors) | target | sonnet | T-013, T-014 | ready | |
 | T-022 | Persistence layer | core | sonnet | — | merged | #4 |
 | T-025 | Persistence hardening (T-022 review follow-ups) | core | sonnet | — | merged | #18 |
-| T-026 | Grouper onto shared repo methods + tests | core | sonnet | T-025 | rework | #21 |
+| T-026 | Grouper onto shared repo methods + tests | core | sonnet | T-025 | merged | #21 |
 | T-021 | Alert ingest + dedupe | core | sonnet | T-022 | merged | #13 |
 | T-023 | Incident grouper | core | sonnet | T-022 | merged | #11 |
 | T-027 | Ingest follow-ups (resolved updates, fixtures) | core | sonnet | T-021, T-024, T-025 | merged | #23 |
 | T-024 | M2 acceptance: storm + replay | core | sonnet | T-021, T-023 | merged | #19 |
 | T-031 | LLM client + record/replay | agents | sonnet | — | merged | #7 |
 | T-032 | Agent runtime + tool gateway | agents | **opus** (high risk) | — | merged | #16 |
-| T-033 | LLM client + runtime follow-ups (T-031/T-032 minors) | agents | sonnet | T-031, T-032 | in-review | #25 |
-| T-034 | Read tools (Prometheus, Loki, deploys, service graph) | agents | sonnet | T-032 | ready | |
-| T-041 | Single-agent baseline (config, prompt, runner, CLI) | agents | sonnet | T-033, T-034 | pending | |
+| T-033 | LLM client + runtime follow-ups (T-031/T-032 minors) | agents | sonnet | T-031, T-032 | merged | #25 |
+| T-034 | Read tools (Prometheus, Loki, deploys, service graph) | agents | sonnet | T-032 | merged | #28 |
+| T-035 | Read-tool hardening (T-034 minors) | agents | sonnet | T-034 | in-progress | |
+| T-041 | Single-agent baseline (config, prompt, runner, CLI) | agents | sonnet | T-033, T-034 | in-progress |  |
 | T-042 | M3 acceptance: live S1–S7 (**paid, needs Henry**) | evals | sonnet | T-014, T-041 | pending | |
 
 ```
