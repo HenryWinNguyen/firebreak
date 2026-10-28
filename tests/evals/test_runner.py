@@ -618,6 +618,10 @@ def test_unknown_agent_and_unpriced_model_are_errors(
         runner.agent_config_path("nope")
     with pytest.raises(EvalRunError, match="unknown agent"):
         runner.agent_config_path("../baseline")
+    for wrong_case in ("BASELINE", "Baseline-Local"):  # exact stems only, even on macOS
+        with pytest.raises(EvalRunError, match="unknown agent"):
+            runner.agent_config_path(wrong_case)
+    assert runner.agent_config_path("baseline-local").name == "baseline-local.yaml"
     (tmp_path / "ghost.yaml").write_text(
         "name: ghost\nmodel: not-a-model\nsystem_prompt: baseline.md\n"
         "output_schema: InvestigationReport\n"

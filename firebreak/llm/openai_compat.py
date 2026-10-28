@@ -7,8 +7,9 @@ as JSON. If it is invalid JSON, or valid JSON that is not an object, the ``tool_
 is still returned, with ``input`` set to the raw string (invalid JSON) or the parsed
 non-object value. The tool gateway rejects any non-dict input as invalid arguments, so the
 model sees an error result for that call and can retry. Nothing is dropped or repaired, and
-a warning is logged. When such a block is echoed back, its raw value is sent as the
-``arguments`` string unchanged.
+a warning is logged. When such a block is echoed back in the history, it is sent with
+``arguments`` ``"{}"`` (servers reject non-object arguments); the error tool_result carries the
+explanation. A missing or empty tool-call id becomes ``call_<index>`` (warning logged).
 """
 
 import asyncio
@@ -51,11 +52,17 @@ def _text_of_result(content: Any) -> str:
     return json.dumps(content)
 
 
-def _arguments_string(value: Any) -> str:
-    """Anthropic ``input`` -> OpenAI ``arguments`` string. A raw string passes through as is."""
-    if isinstance(value, str):
-        return value
-    return json.dumps(value)
+def _arguments_string(value: Any, *, name: Any = None) -> str:
+    """Anthropic ``input`` -> OpenAI ``arguments`` JSON-object string.
+
+    A malformed call (``input`` not a dict) is echoed as ``"{}"``: servers such as Ollama parse
+    history arguments into a map and answer 400 on anything else. The gateway's error
+    tool_result already tells the model what was wrong with the call.
+    """
+    if isinstance(value, dict):
+        return json.dumps(value)
+    log.warning("echoing malformed arguments of tool call %r as {} (was %.100r)", name, value)
+    return "{}"
 
 
 def _convert_message(msg: dict[str, Any]) -> list[dict[str, Any]]:
@@ -79,7 +86,9 @@ def _convert_message(msg: dict[str, Any]) -> list[dict[str, Any]]:
                     "type": "function",
                     "function": {
                         "name": block.get("name"),
-                        "arguments": _arguments_string(block.get("input", {})),
+                        "arguments": _arguments_string(
+                            block.get("input", {}), name=block.get("name")
+                        ),
                     },
                 }
             )
@@ -259,7 +268,7 @@ class OpenAICompatLLMClient:
         return body
 
     async def _complete_with_retries(self, request: LLMRequest) -> LLMResponse:
-        max_retries = self._settings.max_retries
+        max_retries = self._settings.openai_max_retries
         attempt = 0
         while True:
             await self._limiter.acquire()
@@ -312,19 +321,33 @@ class OpenAICompatLLMClient:
         tool_calls = message.get("tool_calls") or []
         if not isinstance(tool_calls, list):
             raise LLMError(f"openai_compat tool_calls for {requested_model} is not a list")
-        for call in tool_calls:
+        for index, call in enumerate(tool_calls):
             fn = call.get("function") if isinstance(call, dict) else None
             if not isinstance(fn, dict):
                 raise LLMError(f"openai_compat tool call without a function: {call!r:.200}")
+            call_id = call.get("id")
+            if not isinstance(call_id, str) or not call_id.strip():
+                call_id = f"call_{index}"
+                log.warning(
+                    "tool call %r from %s had no id; using %s",
+                    fn.get("name"),
+                    requested_model,
+                    call_id,
+                )
             content.append(
                 {
                     "type": "tool_use",
-                    "id": call.get("id") or "",
+                    "id": call_id,
                     "name": fn.get("name") or "",
                     "input": _parse_arguments(
-                        fn.get("arguments", ""), name=fn.get("name"), call_id=call.get("id")
+                        fn.get("arguments", ""), name=fn.get("name"), call_id=call_id
                     ),
                 }
+            )
+        if not content:
+            raise LLMError(
+                f"empty completion from {requested_model}: no text and no tool calls "
+                f"(finish_reason={choice.get('finish_reason')!r})"
             )
         finish = choice.get("finish_reason")
         if finish not in _FINISH_REASONS:

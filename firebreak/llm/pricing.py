@@ -24,7 +24,7 @@ Provider = Literal["anthropic", "openai_compat"]
 
 
 class ModelPricing(BaseModel):
-    provider: Provider = "anthropic"
+    provider: Provider  # required: a model with no provider is never guessed
     tiers: list[PriceTier]
 
 

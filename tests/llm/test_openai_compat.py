@@ -324,22 +324,55 @@ async def test_malformed_args_are_rejected_by_the_gateway_as_invalid_args() -> N
     assert "must be a JSON object" in result.content
 
 
-async def test_malformed_args_echo_back_as_the_raw_string() -> None:
+@pytest.mark.parametrize("bad", ['{"q": ', "", [1, 2], "str", None, 7])
+async def test_malformed_args_echo_back_as_an_empty_object(bad: Any) -> None:
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": "go"},
         {
             "role": "assistant",
-            "content": [{"type": "tool_use", "id": "c1", "name": "a_tool", "input": '{"q": '}],
+            "content": [
+                {"type": "tool_use", "id": "c1", "name": "a_tool", "input": bad},
+                {"type": "tool_use", "id": "c2", "name": "b_tool", "input": {"ok": 1}},
+            ],
         },
         {
             "role": "user",
-            "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "tool_error"}],
+            "content": [
+                {"type": "tool_result", "tool_use_id": "c1", "content": "tool_error"},
+                {"type": "tool_result", "tool_use_id": "c2", "content": "fine"},
+            ],
         },
     ]
     fake = ok()
     client, _ = make_client(fake)
     await client.complete(req(messages))
-    assert fake.bodies[0]["messages"][2]["tool_calls"][0]["function"]["arguments"] == '{"q": '
+    calls = fake.bodies[0]["messages"][2]["tool_calls"]
+    assert [c["function"]["arguments"] for c in calls] == ["{}", '{"ok": 1}']
+    for c in calls:  # always a JSON object, never a bare string/list
+        assert isinstance(json.loads(c["function"]["arguments"]), dict)
+
+
+async def test_empty_completion_is_a_typed_error() -> None:
+    for content in (None, ""):
+        client, _ = make_client(ok(chat_json(content=content)))
+        with pytest.raises(LLMError, match="empty completion"):
+            await client.complete(req())
+
+
+@pytest.mark.parametrize("missing", [None, "", "  "])
+async def test_missing_tool_call_id_gets_a_deterministic_one(
+    missing: str | None, caplog: pytest.LogCaptureFixture
+) -> None:
+    c1 = call("x", "a_tool", "{}")
+    c1["id"] = missing
+    body = chat_json(
+        content=None, tool_calls=[call("real", "b_tool", "{}"), c1], finish="tool_calls"
+    )
+    client, _ = make_client(ok(body))
+    with caplog.at_level(logging.WARNING):
+        resp = await client.complete(req())
+    assert [b["id"] for b in resp.content] == ["real", "call_1"]
+    assert any("no id" in r.message for r in caplog.records)
 
 
 # ---- errors, retries, settings ----
@@ -372,10 +405,22 @@ async def test_retries_exhausted_and_timeout_are_retryable() -> None:
     def slow(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("slow", request=request)
 
-    client, sleeps = make_client(slow, max_retries=2)
+    client, sleeps = make_client(slow, openai_max_retries=2)
     with pytest.raises(LLMRetriesExhausted):
         await client.complete(req())
     assert len(sleeps) == 2
+
+
+async def test_openai_retries_default_to_one_not_the_anthropic_setting() -> None:
+    assert LLMSettings().openai_max_retries == 1
+
+    def slow(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow", request=request)
+
+    client, sleeps = make_client(slow)  # max_retries default (4) must not apply
+    with pytest.raises(LLMRetriesExhausted):
+        await client.complete(req())
+    assert len(sleeps) == 1
 
 
 async def test_4xx_is_a_non_retried_typed_error() -> None:
@@ -418,6 +463,7 @@ def test_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_pricing_providers() -> None:
     table = PricingTable.load(LLMSettings().pricing_path)
     assert table.provider_for(SONNET) == "anthropic"
+    assert all(m.provider for m in table.models.values())
     assert table.provider_for(LOCAL) == "openai_compat"
     assert table.cost_usd(LOCAL, Usage(input_tokens=10**6, output_tokens=10**6)) == 0.0
     with pytest.raises(UnknownModelError, match="mystery"):
@@ -556,3 +602,13 @@ async def test_real_ollama_round_trip() -> None:
         )
     )
     assert resp.stop_reason in {"end_turn", "max_tokens"} and resp.usage.cost_usd == 0.0
+
+
+def test_provider_is_required_in_pricing_entries(tmp_path: Path) -> None:
+    p = tmp_path / "pricing.yaml"
+    p.write_text(
+        "models:\n  m:\n    tiers:\n      - input: 1\n        cache_write: 1\n"
+        "        cache_read: 1\n        output: 1\n"
+    )
+    with pytest.raises(ValueError, match="provider"):
+        PricingTable.load(p)

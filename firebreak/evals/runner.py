@@ -350,10 +350,10 @@ async def replay_scenario(
 
 def agent_config_path(agent: str) -> Path:
     """The config file of an eval agent (``firebreak/agents/configs/<agent>.yaml``)."""
-    path = CONFIGS_DIR / f"{agent}.yaml"
-    if "/" in agent or "\\" in agent or agent.startswith(".") or not path.is_file():
-        known = sorted(p.stem for p in CONFIGS_DIR.glob("*.yaml"))
-        raise EvalRunError(f"unknown agent {agent!r}; known agents: {known}")
+    known = {p.stem: p for p in CONFIGS_DIR.glob("*.yaml")}  # exact, case-sensitive stems
+    path = known.get(agent)
+    if path is None:
+        raise EvalRunError(f"unknown agent {agent!r}; known agents: {sorted(known)}")
     return path
 
 
