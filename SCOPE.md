@@ -82,6 +82,10 @@ needs to be reproducible from a command in the repo.
 - **Models:** tiered by job. Haiku 5.5 handles triage and cheap
   classification, Sonnet 5.5 the specialists, and Opus 5.5 the synthesizer
   and critic. Models are configured per agent, never hardcoded.
+  **Hybrid model plan (Henry, 2026-10-28):** day-to-day iteration runs on a free local
+  open-weight model (Ollama, OpenAI-compatible API, e.g. Qwen3 8B) through a second
+  `LLMClient`; paid Claude calls are reserved for the recorded headline eval runs, which
+  then replay for $0. Baseline and multi-agent are always compared on the same model.
 - **Target system:** a purpose-built demo microservice stack (*Shopfloor*:
   gateway → orders → inventory, plus Postgres and Redis). It is fully
   instrumented and has **chaos flags** that inject realistic faults. It is
