@@ -5,7 +5,9 @@ shared runtime and returns the ``InvestigationReport`` with usage, steps and lat
 later multi-agent result is compared against this.
 
 Run it: ``uv run python -m firebreak.agents.baseline <incident_id>`` (needs the stack up and a
-real ``ANTHROPIC_API_KEY`` unless ``FIREBREAK_LLM_MODE=replay``).
+real ``ANTHROPIC_API_KEY`` unless ``FIREBREAK_LLM_MODE=replay``). Spend gate: an agent that routes
+to ``anthropic`` is refused (exit 2, before any client is built) unless ``FIREBREAK_EVAL_LIVE=1``;
+``--agent baseline-local`` needs no Anthropic key; replay needs no opt-in.
 
 Failure model: an incident that doesn't exist raises ``IncidentNotFoundError``. A run that
 ends without a valid report (budget, max steps, refusal, invalid output) is a *result*, not
@@ -173,7 +175,7 @@ def summary_line(result: BaselineResult) -> str:
     )
 
 
-async def _amain(incident_id: str) -> int:
+async def _amain(incident_id: str, config_path: Path) -> int:
     from firebreak.db.engine import make_engine, make_session_factory
     from firebreak.llm.client import build_llm_client
 
@@ -184,6 +186,7 @@ async def _amain(incident_id: str) -> int:
             llm=build_llm_client(),
             sessions=make_session_factory(engine),
             tools_settings=ToolSettings(),
+            config_path=config_path,
         )
     except IncidentNotFoundError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -201,9 +204,21 @@ async def _amain(incident_id: str) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the single-agent baseline on an incident.")
     parser.add_argument("incident_id")
+    parser.add_argument("--agent", default="baseline", help="agent config name (default: baseline)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
-    return asyncio.run(_amain(args.incident_id))
+    # Imported here: the runner imports this module. The gate runs before any client is built.
+    from firebreak.evals.runner import EvalRunError, agent_config_path, require_live_env
+    from firebreak.llm.settings import LLMMode, LLMSettings
+
+    try:
+        config_path = agent_config_path(args.agent)
+        if LLMSettings().mode is not LLMMode.REPLAY:
+            require_live_env(agent=args.agent)
+    except EvalRunError as e:  # includes LiveModeRefusedError
+        print(f"error: refusing to run, nothing was spent: {e}", file=sys.stderr)
+        return 2
+    return asyncio.run(_amain(args.incident_id, config_path))
 
 
 if __name__ == "__main__":

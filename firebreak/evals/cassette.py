@@ -50,6 +50,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict
 from firebreak.ingest.service_graph import ServiceGraph
 from firebreak.llm.client import KeyLoggingRecorder, StrictReplayLLMClient
 from firebreak.llm.fixtures import FixtureStore, StaleRecordingError
+from firebreak.llm.settings import LLMSettings
 from firebreak.models.common import deterministic
 from firebreak.models.llm import LLMClient, LLMRequest
 from firebreak.tools.adapters.base import (
@@ -580,9 +581,11 @@ class RecordingMeta(BaseModel):
 
 
 def default_secrets() -> list[str]:
-    """Values that must never appear in a recording: the API key and the admin token."""
+    """Values that must never appear in a recording: provider keys and the admin token."""
+    openai_key = LLMSettings().openai_api_key
     found = [
         os.environ.get("ANTHROPIC_API_KEY", ""),
+        openai_key.get_secret_value() if openai_key is not None else "",
         ToolSettings().shopfloor_admin_token.get_secret_value(),
     ]
     return [s for s in found if s]
