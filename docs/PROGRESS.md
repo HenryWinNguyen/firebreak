@@ -16,10 +16,20 @@ milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 
 ## Current status
 
-**M2 done. M3 code done; live acceptance (T-042) waits on Henry.** M1 acceptance (T-014) in rework. CP0 passed 2026-10-27. Board: `docs/tasks/BOARD.md`.
+**M2 done. M3 code done; live acceptance (T-042) waits on Henry.** M1 done. CP0 passed 2026-10-27. Board: `docs/tasks/BOARD.md`.
 Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
 ## Log
+
+### 2026-10-28: M1 acceptance + live M2 reproduction
+- **T-014** (#20, 1 rework): S1–S4 each fire the expected alert on the live stack and clear after reset
+  (fire: S1 171 s, S2 150 s, S3 210 s, S4 153 s). Reset always runs, broken load generators fail the test,
+  stale alerts can't pass (3 clean polls, Prometheus pending checked, `startsAt` after the fault). **M1 done.**
+- Lead ran T-024's `make up` + curl reproduction and found the API container never applied migrations
+  (`relation "alerts" does not exist`, 500); every test builds its own schema, so nothing caught it. Fixed:
+  the API image runs `alembic upgrade head` before serving; `make migrate` added. Rerun: 15-alert storm → 1
+  incident with 15 alerts; replay → all duplicates. **M2 done end to end.**
+- Backlog: a CI smoke job that builds the API image against a fresh Postgres and posts one webhook.
 
 ### 2026-10-28: M2 complete, M3 baseline built
 - **T-026** (#21, 1 rework): grouper uses only repository `*_in` methods; out-of-order guard (firing replay

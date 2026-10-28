@@ -7,7 +7,7 @@
 | T-011 | Shopfloor services | target | sonnet | — | merged | #5 |
 | T-012 | Chaos flags + faults S1–S6 (+ T-011 review follow-ups) | target | sonnet | T-011 | merged | #12 |
 | T-013 | Observability stack + alert rules | target | sonnet | — | merged | #10 |
-| T-014 | M1 acceptance: S1–S4 alerts | target | sonnet | T-012, T-013 | rework | #20 |
+| T-014 | M1 acceptance: S1–S4 alerts | target | sonnet | T-012, T-013 | merged | #20 |
 | T-015 | Observability follow-ups (T-013 minors) | target | sonnet | T-013, T-014 | ready | |
 | T-022 | Persistence layer | core | sonnet | — | merged | #4 |
 | T-025 | Persistence hardening (T-022 review follow-ups) | core | sonnet | — | merged | #18 |
