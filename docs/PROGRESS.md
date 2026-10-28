@@ -25,6 +25,13 @@ Repo: https://github.com/HenryWinNguyen/firebreak (public).
 ## Log
 
 ### 2026-10-28: M4 eval harness
+- **T-051** (#59, Opus review 0 blocking + 4 pre-merge fixes): `run --mode record --agent NAME --drive` applies each
+  scenario's faults via the Shopfloor admin API, runs bounded closed-loop load, waits for the matching incident
+  (opened after apply; alertname + service), records, and always resets (shielded from cancellation). Any firing or
+  pending alert counts as a dirty stack; a clear timeout fails the run (sticky); crashed load workers restart and an
+  unhealthy load fails the scenario. One scenario's error no longer aborts the batch; exit code 1 on any error.
+  Lead confirmed against Ollama: history with malformed tool args echoed as `{}` → 200, raw invalid JSON → 400
+  (the T-047 review's blocking finding was real). Backlog: reset an inventory deploy too (no scenario uses one yet).
 - **T-050** (#56): Ollama silently truncates prompts beyond `OLLAMA_CONTEXT_LENGTH` (default 4096). The
   OpenAI-compatible client now refuses a prompt that can't fit (`FIREBREAK_LLM_OPENAI_CONTEXT_TOKENS`, default 32768,
   must match the server) and raises `ContextOverflowError` when reply usage shows near-full context; never retried,
