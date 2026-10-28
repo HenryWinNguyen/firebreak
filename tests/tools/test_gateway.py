@@ -1,7 +1,11 @@
+import asyncio
 import re
+from datetime import UTC, datetime
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
+from firebreak.models.common import deterministic, new_id
 from firebreak.models.evidence import EvidenceKind
 from firebreak.models.llm import ToolAccess
 from firebreak.tools.adapters.base import BackendTimeout
@@ -330,3 +334,41 @@ async def test_oversized_raw_rejected(sink: FakeEvidenceSink) -> None:
         make_cfg(tools=["t"]), "t", {}, ctx
     )
     assert res.error_code is ToolErrorCode.INVALID_OUTPUT and sink.stored == {}
+
+
+async def test_evidence_ids_follow_call_start_order_not_completion_order(
+    sink: FakeEvidenceSink,
+) -> None:
+    release = {n: asyncio.Event() for n in range(3)}
+    finished: list[int] = []
+
+    class Args(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        n: int
+
+    async def h(args: Args, ctx: ToolContext) -> ToolOutput:
+        await release[args.n].wait()
+        finished.append(args.n)
+        return ToolOutput(kind=EvidenceKind.LOG_LINES, query=f"q{args.n}", content=f"c{args.n}")
+
+    reg = ToolRegistry()
+    reg.register(name="t", description="d", args_model=Args, handler=h, access=ToolAccess.READ)
+    gw = ToolGateway(reg)
+    ctx = ToolContext(incident_id=INCIDENT, evidence=sink)
+    at = datetime(2026, 1, 1, tzinfo=UTC)
+
+    with deterministic("seed", at=at):
+        expected = [new_id("ev") for _ in range(3)]
+    with deterministic("seed", at=at):
+        tasks = [
+            asyncio.create_task(gw.invoke(make_cfg(tools=["t"]), "t", {"n": n}, ctx))
+            for n in range(3)
+        ]
+        await asyncio.sleep(0)
+        for n in (2, 1, 0):  # finish in reverse of start order
+            release[n].set()
+            await asyncio.sleep(0.01)
+        results = await asyncio.gather(*tasks)
+    assert finished == [2, 1, 0]
+    assert [r.evidence.id for r in results if r.evidence] == expected

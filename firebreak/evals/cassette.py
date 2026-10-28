@@ -27,12 +27,15 @@ touching the adapter, which makes evidence ids identical between record and repl
 """
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
 import os
+import secrets as _secrets
 import shutil
 import tempfile
+import urllib.parse
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -365,6 +368,11 @@ class Cassette:
         return sorted(self._entries, key=lambda e: e.seq)
 
     @property
+    def unconsumed(self) -> int:
+        """Recorded tool calls the replay has not used (always 0 in record mode)."""
+        return sum(len(q) for q in self._by_key.values())
+
+    @property
     def calls(self) -> int:
         return self._seq
 
@@ -580,14 +588,42 @@ def default_secrets() -> list[str]:
     return [s for s in found if s]
 
 
-def find_secrets(directory: Path, secrets: Sequence[str]) -> list[Path]:
-    """Every file under ``directory`` that contains one of ``secrets`` (raw or JSON-escaped)."""
-    needles: list[bytes] = []
-    for s in secrets:
+def _secret_needles(secrets: Sequence[str]) -> list[bytes]:
+    """Byte forms to look for: raw, JSON-escaped, base64 (both alphabets), URL-encoded."""
+    needles: set[bytes] = set()
+    for i, s in enumerate(secrets):
         if len(s) < MIN_SECRET_CHARS:
+            # Never log the value itself.
+            logger.warning(
+                "secret #%d is only %d chars (< %d): too short to scan for safely, so it is "
+                "NOT checked in recordings",
+                i,
+                len(s),
+                MIN_SECRET_CHARS,
+            )
             continue
-        needles.append(s.encode("utf-8"))
-        needles.append(json.dumps(s, ensure_ascii=True)[1:-1].encode("utf-8"))
+        raw = s.encode("utf-8")
+        forms = {
+            s,
+            json.dumps(s, ensure_ascii=True)[1:-1],
+            urllib.parse.quote(s, safe=""),
+            urllib.parse.quote_plus(s),
+            base64.b64encode(raw).decode("ascii"),
+            base64.urlsafe_b64encode(raw).decode("ascii"),
+        }
+        # Padding depends on what follows in the encoded text, so match the unpadded form too.
+        forms |= {f.rstrip("=") for f in forms}
+        needles |= {f.encode("utf-8") for f in forms if f}
+    return sorted(needles)
+
+
+def find_secrets(directory: Path, secrets: Sequence[str]) -> list[Path]:
+    """Every file under ``directory`` containing a secret (raw, JSON-escaped, base64, URL-encoded).
+
+    Secrets shorter than ``MIN_SECRET_CHARS`` can't be scanned safely; each one is logged
+    as a warning (without its value) and skipped.
+    """
+    needles = _secret_needles(secrets)
     hits: list[Path] = []
     for path in sorted(p for p in directory.rglob("*") if p.is_file()):
         data = path.read_bytes()
@@ -653,6 +689,29 @@ class ReplayedRun:
     meta: RecordingMeta
 
 
+def _swap_in(staging: Path, directory: Path, tag: str) -> None:
+    """Put ``staging`` at ``directory``: old aside, new in, then old deleted.
+
+    A failure before the new recording is in place restores the old one untouched.
+    """
+    aside: Path | None = None
+    if directory.exists():
+        aside = directory.with_name(f".{directory.name}.old.{tag}")
+        directory.rename(aside)
+    try:
+        staging.rename(directory)
+    except BaseException:
+        if aside is not None:
+            aside.rename(directory)
+        raise
+    if aside is not None:
+        try:
+            shutil.rmtree(aside)
+        except OSError:
+            # The new recording is already in place; a leftover copy is harmless but not silent.
+            logger.exception("could not remove the replaced recording %s", aside)
+
+
 @contextmanager
 def record_run(
     directory: Path,
@@ -674,9 +733,9 @@ def record_run(
     """
     if directory.exists() and not overwrite:
         raise FileExistsError(f"recording {directory} exists; pass overwrite=True to re-record")
-    staging = directory.with_name(f".{directory.name}.recording")
-    if staging.exists():
-        shutil.rmtree(staging)
+    # Unique per run, so concurrent or crashed runs never share or clobber a staging dir.
+    tag = f"{os.getpid()}.{_secrets.token_hex(4)}"
+    staging = directory.with_name(f".{directory.name}.recording.{tag}")
     staging.mkdir(parents=True)
     try:
         cassette = Cassette.record(staging, adapters, scenario=scenario)
@@ -707,9 +766,7 @@ def record_run(
                 f"recording for scenario {scenario!r} contains a secret in: {names}; "
                 "nothing was kept"
             )
-        if directory.exists():
-            shutil.rmtree(directory)
-        staging.rename(directory)
+        _swap_in(staging, directory, tag)
     except BaseException:
         try:
             shutil.rmtree(staging)
@@ -745,6 +802,14 @@ def replay_run(directory: Path, *, graph: ServiceGraph | None = None) -> Iterato
     with deterministic(meta.seed, at=meta.at):
         yield ReplayedRun(llm=llm, adapters=cassette.adapters, cassette=cassette, meta=meta)
     cassette.raise_if_stale()
+    if cassette.unconsumed:
+        raise StaleRecordingError(
+            scenario=meta.scenario,
+            step=f"tool call {cassette.calls + 1}",
+            detail=f"the run ended after {cassette.calls} tool calls; the recording has "
+            f"{cassette.calls + cassette.unconsumed}",
+            path=str(directory / TOOLS_FILE),
+        )
     if llm.steps != len(meta.llm_steps):
         raise StaleRecordingError(
             scenario=meta.scenario,

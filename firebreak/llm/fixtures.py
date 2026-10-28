@@ -15,7 +15,12 @@ from firebreak.models.llm import LLMRequest, LLMResponse
 # so the same run never produces byte-identical messages twice. The nonce is a security
 # boundary, not content: the key replaces each distinct nonce with its order of first
 # appearance, so the key still changes when anything else in the conversation does.
-_NONCE = re.compile(r'nonce="([0-9a-f]{16})"')
+#
+# Only the wrapper's own tags match: ``<untrusted-data ... nonce="X">`` and
+# ``</untrusted-data nonce="X">``. Nonce-shaped text inside content is content, and is hashed.
+_NONCE = re.compile(
+    r'(<untrusted-data\b[^<>]*?\snonce="|</untrusted-data\snonce=")([0-9a-f]{16})(")'
+)
 
 
 class StaleRecordingError(FixtureMissing):
@@ -50,7 +55,7 @@ class StaleRecordingError(FixtureMissing):
 
 def _normalize_nonces(value: Any, seen: dict[str, str]) -> Any:
     if isinstance(value, str):
-        return _NONCE.sub(lambda m: f'nonce="{seen.setdefault(m[1], f"n{len(seen)}")}"', value)
+        return _NONCE.sub(lambda m: f"{m[1]}{seen.setdefault(m[2], f'n{len(seen)}')}{m[3]}", value)
     if isinstance(value, list):
         return [_normalize_nonces(v, seen) for v in value]
     if isinstance(value, dict):
