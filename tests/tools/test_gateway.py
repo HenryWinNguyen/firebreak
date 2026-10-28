@@ -2,10 +2,13 @@ import re
 
 import pytest
 
+from firebreak.models.evidence import EvidenceKind
+from firebreak.models.llm import ToolAccess
 from firebreak.tools.context import ToolContext
 from firebreak.tools.errors import ToolErrorCode
 from firebreak.tools.gateway import ToolGateway
-from tests.tools.fakes import INCIDENT, INJECTION, FakeEvidenceSink, make_cfg, make_registry
+from firebreak.tools.registry import ToolOutput, ToolRegistry
+from tests.tools.fakes import INCIDENT, INJECTION, FakeEvidenceSink, NoArgs, make_cfg, make_registry
 
 ALL_TOOLS = ["echo", "restart_service", "slow", "boom", "bad_output", "inject"]
 
@@ -260,3 +263,36 @@ async def test_bare_tool_error_has_a_code(gw: ToolGateway, ctx: ToolContext) -> 
 
     res = gw.error_result(make_cfg(), "echo", {}, ToolError("x"), ctx, call_id="c1")
     assert res.error_code is ToolErrorCode.INTERNAL_ERROR
+
+
+def _raw_registry(content: str, raw: str | None) -> ToolRegistry:
+    async def h(args: NoArgs, ctx: ToolContext) -> ToolOutput:
+        return ToolOutput(kind=EvidenceKind.LOG_LINES, query="q", content=content, raw=raw)
+
+    reg = ToolRegistry()
+    reg.register(name="t", description="d", args_model=NoArgs, handler=h, access=ToolAccess.READ)
+    return reg
+
+
+async def test_raw_stored_content_shown(sink: FakeEvidenceSink) -> None:
+    ctx = ToolContext(incident_id=INCIDENT, evidence=sink)
+    gw = ToolGateway(_raw_registry("short view", '{"full": "payload"}'))
+    res = await gw.invoke(make_cfg(tools=["t"]), "t", {}, ctx)
+    assert res.evidence is not None
+    assert "short view" in res.content and "full" not in res.content
+    assert sink.stored[res.evidence.id][1] == '{"full": "payload"}'
+    assert res.evidence.summary == "short view"
+
+
+async def test_raw_none_falls_back_to_content(sink: FakeEvidenceSink) -> None:
+    ctx = ToolContext(incident_id=INCIDENT, evidence=sink)
+    res = await ToolGateway(_raw_registry("same", None)).invoke(make_cfg(tools=["t"]), "t", {}, ctx)
+    assert res.evidence is not None and sink.stored[res.evidence.id][1] == "same"
+
+
+async def test_oversized_raw_rejected(sink: FakeEvidenceSink) -> None:
+    ctx = ToolContext(incident_id=INCIDENT, evidence=sink)
+    res = await ToolGateway(_raw_registry("ok", "x" * 2_000_000)).invoke(
+        make_cfg(tools=["t"]), "t", {}, ctx
+    )
+    assert res.error_code is ToolErrorCode.INVALID_OUTPUT and sink.stored == {}

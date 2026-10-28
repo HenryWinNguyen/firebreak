@@ -5,6 +5,7 @@ backend verbatim. Results are rendered compactly and sized to fit
 ``max_output_chars``; ``Evidence.query`` records the exact resolved query and window.
 """
 
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -217,16 +218,16 @@ def render_logs(result: LogResult, budget: int = _RENDER_BUDGET) -> str:
 
 def build_read_registry(
     settings: ToolSettings,
-    adapters: ReadAdapters | None = None,
+    adapters: ReadAdapters,
     *,
     clock: Clock | None = None,
 ) -> ToolRegistry:
     """Register exactly the six §3.4 tools.
 
-    With ``adapters=None`` real HTTP adapters are built from ``settings``; to close
-    them, build them with ``build_default_adapters`` and pass them in.
+    ``adapters`` is required so the caller owns the HTTP clients and can close them
+    (``await adapters.aclose()``); ``build_default_adapters(settings)`` makes the real ones.
     """
-    ad = adapters if adapters is not None else build_default_adapters(settings)
+    ad = adapters
     now = clock or _utc_now
 
     def utc_now() -> datetime:
@@ -242,6 +243,7 @@ def build_read_registry(
             kind=EvidenceKind.METRIC_SERIES,
             query=f"promql_query {args.query} @ {_iso(at)}",
             content=_series_text(result),
+            raw=json.dumps(result.raw),
         )
 
     async def promql_range(args: PromqlRangeArgs, ctx: ToolContext) -> ToolOutput:
@@ -255,6 +257,7 @@ def build_read_registry(
                 f"step={args.step_seconds}s"
             ),
             content=_series_text(result),
+            raw=json.dumps(result.raw),
         )
 
     async def list_metrics(args: ListMetricsArgs, ctx: ToolContext) -> ToolOutput:
@@ -277,6 +280,7 @@ def build_read_registry(
             kind=EvidenceKind.METRIC_SERIES,
             query=f"list_metrics prefix={prefix!r}",
             content=text,
+            raw=json.dumps(names),
         )
 
     async def logql_query(args: LogqlQueryArgs, ctx: ToolContext) -> ToolOutput:
@@ -289,6 +293,7 @@ def build_read_registry(
                 f"logql_query {args.query} | start={_iso(start)} end={_iso(end)} limit={args.limit}"
             ),
             content=render_logs(result),
+            raw=json.dumps(result.raw),
         )
 
     async def recent_deploys(args: RecentDeploysArgs, ctx: ToolContext) -> ToolOutput:
@@ -300,6 +305,7 @@ def build_read_registry(
             kind=EvidenceKind.DEPLOY,
             query=f"recent_deploys service={args.service} limit={args.limit}",
             content="\n".join(rows) if rows else "(no deploys recorded)",
+            raw=json.dumps([d.model_dump(mode="json") for d in deploys]),
         )
 
     async def service_graph(args: NoArgs, ctx: ToolContext) -> ToolOutput:
@@ -310,6 +316,7 @@ def build_read_registry(
             kind=EvidenceKind.CONFIG,
             query="service_graph config/service_graph.yaml",
             content="\n".join(parts),
+            raw=json.dumps({"clusters": g.clusters, "edges": g.edges}),
         )
 
     reg = ToolRegistry()

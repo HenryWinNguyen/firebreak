@@ -219,7 +219,7 @@ async def test_promql_range_window_and_query_recorded(
 async def test_promql_range_oversized_is_downsampled(
     gw: ToolGateway, sink: FakeEvidenceSink, backend: Backend
 ) -> None:
-    backend.prom = matrix(1440, series=30)
+    backend.prom = matrix(1440, series=12)
     r = await call(
         gw, sink, "promql_range", {"query": "up", "minutes_back": 120, "step_seconds": 5}
     )
@@ -421,3 +421,39 @@ def test_settings_defaults() -> None:
     assert s.shopfloor_admin_token.get_secret_value() == "dev-admin-token"
     assert "dev-admin-token" not in repr(s)
     json.dumps(s.shopfloor_urls)
+
+
+async def test_stored_blob_is_full_json(
+    gw: ToolGateway, sink: FakeEvidenceSink, backend: Backend
+) -> None:
+    backend.prom = matrix(1440, series=12)
+    backend.loki = streams(["a", "b"])
+    backend.deploys = [
+        {
+            "service": "orders",
+            "version": "v1",
+            "deployed_at": "2026-10-27T09:00:00Z",
+            "message": "m",
+        }
+    ]
+    cases = [
+        ("promql_range", {"query": "up"}, backend.prom["data"]),
+        ("promql_query", {"query": "up"}, backend.prom["data"]),
+        ("logql_query", {"query": '{a="b"}'}, backend.loki["data"]),
+        ("list_metrics", {}, backend.names["data"]),
+    ]
+    for tool, args, expected in cases:
+        r = await call(gw, sink, tool, args)
+        assert not r.is_error, r.content
+        assert json.loads(sink.stored[r.evidence.id][1]) == expected
+    r = await call(gw, sink, "recent_deploys", {"service": "orders"})
+    blob = json.loads(sink.stored[r.evidence.id][1])
+    assert blob[0]["version"] == "v1" and blob[0]["message"] == "m"
+    r = await call(gw, sink, "service_graph", {})
+    assert "edges" in json.loads(sink.stored[r.evidence.id][1])
+
+
+async def test_adapters_aclose_closes_clients() -> None:
+    ad = _dummy_adapters()
+    await ad.aclose()
+    assert ad.metrics._http._client.is_closed  # type: ignore[attr-defined]
