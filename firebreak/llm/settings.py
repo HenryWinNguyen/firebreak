@@ -3,7 +3,7 @@
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,3 +24,10 @@ class LLMSettings(BaseSettings):
     backoff_base_seconds: float = Field(default=1.0, gt=0)
     backoff_max_seconds: float = Field(default=30.0, gt=0)
     timeout_seconds: float = Field(default=120.0, gt=0)
+    # OpenAI-compatible provider (local Ollama by default). Ollama needs no key.
+    openai_base_url: str = "http://localhost:11434/v1"
+    openai_api_key: SecretStr | None = None
+    openai_timeout_seconds: float = Field(default=300.0, gt=0)
+    # Retries after the first attempt for the local provider. Kept at 1 (not max_retries) because
+    # each attempt can take up to openai_timeout_seconds; 5 x 300s would stall a hung model ~25 min.
+    openai_max_retries: int = Field(default=1, ge=0, le=4)

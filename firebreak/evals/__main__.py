@@ -16,6 +16,7 @@ from firebreak.evals.runner import (
     EvalRunError,
     EvalSettings,
     RunOutcome,
+    agent_config_path,
     ensure_eval_database,
     record_scenario,
     replay_all,
@@ -72,10 +73,9 @@ def _eval_url(args: argparse.Namespace) -> str:
 
 
 async def _run(args: argparse.Namespace) -> int:
-    if args.agent != "baseline":
-        raise EvalRunError(f"unknown agent {args.agent!r}; only 'baseline' exists until M5")
+    agent_config_path(args.agent)  # unknown agent: fail before touching anything
     if args.mode == "record":
-        require_live_env()  # fail before touching anything
+        require_live_env(agent=args.agent)  # fail before touching anything
     scenarios = select_scenarios(load_scenarios(args.scenarios_dir), _names(args.scenarios))
     url = _eval_url(args)
     await ensure_eval_database(url)
@@ -123,7 +123,7 @@ async def _record(
     tools_settings: ToolSettings,
 ) -> RunOutcome:
     # Imported here so replay mode can never reach the real adapters or the live LLM client.
-    from firebreak.llm.client import AnthropicLLMClient
+    from firebreak.llm.routing import RoutingLLMClient
     from firebreak.llm.settings import LLMSettings
     from firebreak.tools.read_tools import build_default_adapters
 
@@ -141,7 +141,7 @@ async def _record(
     live_sessions = make_session_factory(live_engine)
     outcome = RunOutcome()
     try:
-        llm = AnthropicLLMClient(LLMSettings())
+        llm = RoutingLLMClient(LLMSettings())  # per-model provider; clients built lazily
         for sc in scenarios:
             outcome.outcomes.append(
                 await record_scenario(
