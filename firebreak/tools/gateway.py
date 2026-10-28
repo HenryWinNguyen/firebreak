@@ -282,14 +282,16 @@ class ToolGateway:
             and isinstance(output.kind, EvidenceKind)
             and isinstance(output.query, str)
             and isinstance(output.content, str)
+            and (output.raw is None or isinstance(output.raw, str))
         ):
             logger.error("tool %r returned %r, not a valid ToolOutput", tool.name, type(output))
             raise InvalidToolOutput(f"tool {tool.name!r} returned a malformed result")
-        if len(output.content) > self._max_content_chars:
+        if max(len(output.content), len(output.raw or "")) > self._max_content_chars:
             logger.error(
-                "tool %r returned %d chars (limit %d chars)",
+                "tool %r returned %d chars of content, %d of raw (limit %d chars)",
                 tool.name,
                 len(output.content),
+                len(output.raw or ""),
                 self._max_content_chars,
             )
             raise InvalidToolOutput(
@@ -341,7 +343,9 @@ class ToolGateway:
         )
         try:
             async with asyncio.timeout(self._evidence_timeout_s):
-                stored = await ctx.evidence.record(evidence, output.content)
+                stored = await ctx.evidence.record(
+                    evidence, output.raw if output.raw is not None else output.content
+                )
         except Exception as e:
             logger.error(
                 "evidence record failed tool=%s incident=%s call=%s",

@@ -23,11 +23,17 @@ DEFAULT_MAX_OUTPUT_CHARS = 3500
 
 @dataclass(frozen=True)
 class ToolOutput:
-    """What a handler returns. ``content`` is the raw (untrusted) payload."""
+    """What a handler returns.
+
+    ``content`` is what the model sees (defanged and capped by the gateway).
+    ``raw`` is the full payload stored as the evidence blob; ``None`` means
+    "same as ``content``". Both are untrusted and both are length-limited.
+    """
 
     kind: EvidenceKind
     query: str
     content: str
+    raw: str | None = None
 
 
 Handler = Callable[[Any, ToolContext], Awaitable[ToolOutput]]
