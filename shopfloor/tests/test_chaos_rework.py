@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from common.metrics import Metrics
 from common.pool import BoundedPool
 from common.runtime import RuntimeSettings
 from conftest import Stack
 from orders import app as orders_app
 from orders.app import OrderStore
+from prometheus_client import generate_latest
 
 AUTH = {"Authorization": "Bearer secret"}
 
@@ -45,6 +47,29 @@ async def test_s3_five_item_cart_exceeds_one_second_only_with_flag() -> None:
     assert await _simulated_insert_seconds(5, True) > 1.0
     assert await _simulated_insert_seconds(5, False) < 0.05
     assert await _simulated_insert_seconds(1, True) < await _simulated_insert_seconds(5, True)
+
+
+async def _queries_for(quantity: int, n_plus_one: bool) -> float:
+    async def no_sleep(seconds: float) -> None:
+        return None
+
+    metrics = Metrics("orders", "1.0.0")
+    assert 'db_queries_total{service="orders"} 0.0' in generate_latest(metrics.registry).decode()
+    counter = metrics.db_queries.labels("orders")
+    store = OrderStore(BoundedPool(_Raw(), lambda: 5), sleep=no_sleep, queries=counter)
+    await store.insert(1, quantity, n_plus_one)
+    text = generate_latest(metrics.registry).decode()
+    line = next(x for x in text.splitlines() if x.startswith("db_queries_total{"))
+    return float(line.rsplit(" ", 1)[1])
+
+
+async def test_db_queries_total_normal_order_is_two() -> None:
+    assert await _queries_for(5, False) == 2.0
+
+
+async def test_db_queries_total_n_plus_one_is_cart_size_plus_one() -> None:
+    assert await _queries_for(3, True) == 4.0
+    assert await _queries_for(5, True) == 6.0
 
 
 async def test_quantity_above_max_is_422(stack: Stack) -> None:
