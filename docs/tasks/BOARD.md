@@ -32,7 +32,9 @@
 | T-048 | Baseline CLI spend gate + OpenAI key in secret scan | agents | sonnet | T-047 | merged | #53 |
 | T-050 | Context-overflow guard for local models | agents | sonnet | T-047 | merged | #56 |
 | T-051 | Live record driver + per-scenario errors | evals | sonnet | T-045, T-047, T-050 | merged | #59 |
-| T-049 | Local baseline run S1–S7 (`baseline-local`, $0) for CP1 | evals | lead | T-047, T-016, T-050, T-051 | ready (waits for T-016 to free the stack) | |
+| T-052 | Make S5 (memory leak) safe for driven runs | evals | sonnet | T-051 | in-progress | |
+| T-053 | S7 load capacity (multi-process load generator or k6) | target | sonnet | T-016 | pending | |
+| T-049 | Local baseline run (`baseline-local`, $0) for CP1: S1–S4, S6 now; S5 after T-052; S7 after T-053 | evals | lead | T-047, T-016, T-050, T-051 | in-progress (lead) | |
 
 ```
 T-011 ─► T-012 ─┐
