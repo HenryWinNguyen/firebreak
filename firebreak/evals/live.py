@@ -9,8 +9,13 @@ Per scenario (``drive_scenario``):
    Alertmanager or pending/firing in Prometheus, and no earlier teardown failed);
 2. apply the setup via the admin API in the documented order
    (reset -> prior_deploy -> chaos flags -> deploy);
-3. start the scenario's load (bounded concurrency) and keep it running until teardown, so the
-   fault stays visible to the agent while it investigates;
+3. start the scenario's load (bounded concurrency). ``load.hold: until_teardown`` keeps it
+   running until teardown, so the fault stays visible to the agent while it investigates;
+   ``load.hold: duration`` stops it after ``load.duration_s`` (the fault's effect persists).
+   An RSS guard polls the orders ``process_resident_memory_bytes`` from Prometheus the whole
+   time; above ``FIREBREAK_EVAL_DRIVE_MAX_ORDERS_RSS_MB`` it stops the load and fails the
+   scenario (``OrdersRssGuardError``). If the guard cannot read the metric it fails closed;
+   the driver never runs unguarded;
 4. poll the live DB, read-only, for an incident opened after step 2 that carries any of
    ``expect.alerts``;
 5. hand the incident id to ``record`` (the existing ``record_scenario``);
@@ -63,6 +68,14 @@ class IncidentTimeoutError(LiveDriveError, TimeoutError):
     """No matching incident appeared in time."""
 
 
+class OrdersRssGuardError(LiveDriveError):
+    """The orders RSS guard tripped, or could not read the metric (it fails closed)."""
+
+
+RSS_METRIC = "process_resident_memory_bytes"  # the metric the HighMemory alert uses
+RSS_QUERY = f'{RSS_METRIC}{{job="orders"}}'
+
+
 class DriveSettings(BaseSettings):
     """``FIREBREAK_EVAL_DRIVE_*``: driver knobs. Service URLs and the admin token come from
     ``ToolSettings`` (one source of truth)."""
@@ -78,6 +91,7 @@ class DriveSettings(BaseSettings):
     clean_polls: int = Field(default=3, ge=1)
     max_concurrency: int = Field(default=50, ge=1)
     http_timeout_s: float = Field(default=15.0, gt=0)
+    max_orders_rss_mb: float = Field(default=2500.0, gt=0)
 
 
 @dataclass(frozen=True)
@@ -92,6 +106,7 @@ class DriveConfig:
     poll_interval_s: float = 5.0
     clean_polls: int = 3
     max_concurrency: int = 50
+    max_orders_rss_mb: float = 2500.0
 
     def service_url(self, service: str) -> str:
         urls = {"orders": self.orders_url, "inventory": self.inventory_url}
@@ -122,6 +137,7 @@ class DriveConfig:
             poll_interval_s=drive.poll_interval_s,
             clean_polls=drive.clean_polls,
             max_concurrency=drive.max_concurrency,
+            max_orders_rss_mb=drive.max_orders_rss_mb,
         )
 
 
@@ -372,6 +388,12 @@ class LoadGenerator:
             raise LiveDriveError("LoadGenerator.start() before prepare()")
         self._tasks = [asyncio.create_task(self._worker(n)) for n in range(self.workers)]
 
+    async def halt(self) -> None:
+        """Stop sending requests now. Health is still judged by the later ``stop``."""
+        for t in self._tasks:
+            t.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+
     async def stop(self) -> None:
         """Cancel workers; raise if the load was unhealthy or a worker died."""
         dead = [
@@ -399,6 +421,72 @@ class LoadGenerator:
             f"ok={self.ok} http_errors={self.http_errors} transport_errors={self.transport_errors} "
             f"crashes={self.crashes}"
         )
+
+
+# --- guards -------------------------------------------------------------------------------
+
+
+async def orders_rss_mb(client: httpx.AsyncClient, cfg: DriveConfig) -> float:
+    """Largest orders RSS (MiB) per Prometheus. Raises ``OrdersRssGuardError`` if unreadable."""
+    try:
+        body = await _get_json(client, f"{cfg.prometheus_url}/api/v1/query", query=RSS_QUERY)
+        results = body["data"]["result"]
+        values = [float(r["value"][1]) for r in results]
+    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+        raise OrdersRssGuardError(
+            f"RSS guard cannot read {RSS_METRIC} for orders from Prometheus: {_describe(exc)}"
+        ) from exc
+    if not values:
+        raise OrdersRssGuardError(f"RSS guard: Prometheus has no {RSS_METRIC} sample for orders")
+    return max(values) / (1024 * 1024)
+
+
+async def rss_guard(client: httpx.AsyncClient, cfg: DriveConfig) -> None:
+    """Poll orders RSS every poll interval; returns never, raises when over the limit or blind."""
+    while True:
+        rss = await orders_rss_mb(client, cfg)
+        if rss > cfg.max_orders_rss_mb:
+            raise OrdersRssGuardError(
+                f"orders RSS {rss:.0f} MiB exceeds the limit of {cfg.max_orders_rss_mb:g} MiB "
+                "(FIREBREAK_EVAL_DRIVE_MAX_ORDERS_RSS_MB); load stopped"
+            )
+        await asyncio.sleep(cfg.poll_interval_s)
+
+
+async def _stop_load_after(gen: LoadGenerator, seconds: float, sid: str) -> None:
+    await asyncio.sleep(seconds)
+    await gen.halt()
+    logger.info("scenario %s: load held for %gs, stopped (hold: duration)", sid, seconds)
+
+
+async def _guarded(
+    work: Awaitable[Any],
+    guard: "asyncio.Task[None]",
+    gen: LoadGenerator,
+) -> Any:
+    """Await ``work`` inline; if the guard raises first, cancel it, halt the load and raise the
+    guard's error. (Inline, not a child task, so a ``KeyboardInterrupt`` still propagates.)"""
+    me = asyncio.current_task()
+    assert me is not None
+
+    def _on_guard_done(g: "asyncio.Task[None]") -> None:
+        if not g.cancelled():
+            me.cancel()
+
+    guard.add_done_callback(_on_guard_done)
+    try:
+        return await work
+    except asyncio.CancelledError:
+        if guard.done() and not guard.cancelled():
+            me.uncancel()
+            await gen.halt()
+            err = guard.exception()
+            if err is None:
+                raise OrdersRssGuardError("RSS guard stopped unexpectedly") from None
+            raise err from None
+        raise
+    finally:
+        guard.remove_done_callback(_on_guard_done)
 
 
 # --- waiting ------------------------------------------------------------------------------
@@ -586,18 +674,32 @@ async def drive_scenario(
         started = True
         await apply_setup(admin, scenario, cfg)
         logger.info("scenario %s: applied; waiting for an incident", sid)
-        # 3. load
+        # 3. load, guarded
+        guard = asyncio.create_task(rss_guard(plain, cfg))
+        timer: asyncio.Task[None] | None = None
         gen.start()
-        # 4. incident
-        incident_id = await wait_for_incident(
-            scenario,
-            incidents,
-            since=since,
-            timeout_s=cfg.incident_timeout_s,
-            poll_interval_s=cfg.poll_interval_s,
-        )
-        # 5. record
-        result = await record(incident_id)
+        if scenario.load.hold == "duration":
+            timer = asyncio.create_task(_stop_load_after(gen, scenario.load.duration_s, sid))
+        try:
+            # 4. incident, 5. record
+            async def investigate() -> ScenarioOutcome:
+                incident_id = await wait_for_incident(
+                    scenario,
+                    incidents,
+                    since=since,
+                    timeout_s=cfg.incident_timeout_s,
+                    poll_interval_s=cfg.poll_interval_s,
+                )
+                return await record(incident_id)
+
+            result: ScenarioOutcome = await _guarded(investigate(), guard, gen)
+        finally:
+            for t in (guard, timer):
+                if t is not None:
+                    t.cancel()
+            await asyncio.gather(
+                *(t for t in (guard, timer) if t is not None), return_exceptions=True
+            )
     finally:
         # 6. teardown (anything applied or started is undone; a failed prepare() applied nothing)
         if started:

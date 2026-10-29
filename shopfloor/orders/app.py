@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -185,7 +186,21 @@ def create_app(
             "orders.leak_kb_per_request": (0, None),
         },
     )
-    leaked: list[bytes] = []  # S5: never freed until the process restarts
+    leaked: list[bytes] = []  # S5: freed only by /admin/chaos/reset or a process restart
+
+    def release_leak() -> None:
+        """Drop the S5 buffers. The list is emptied for certain; whether RSS falls back is up to
+        the allocator and the OS (large blocks are usually returned, but it is best-effort)."""
+        leaked.clear()
+        gc.collect()
+
+    base_reset = runtime.reset
+
+    def reset_and_release() -> None:
+        base_reset()
+        release_leak()
+
+    runtime.reset = reset_and_release  # type: ignore[method-assign]  # /admin/chaos/reset hook
 
     def on_deploy(version: str, previous: str) -> None:
         if version.endswith("-bad"):

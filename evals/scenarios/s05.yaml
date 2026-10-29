@@ -2,7 +2,7 @@ id: S5
 title: "Memory leak"
 setup:
   chaos: {orders.leak_kb_per_request: 128}
-load: {rps: 50, duration_s: 300, cart_size: 1}
+load: {rps: 50, duration_s: 300, cart_size: 1, hold: duration}
 expect:
   alerts:  # any-of
     - {alertname: HighMemory, service: orders}

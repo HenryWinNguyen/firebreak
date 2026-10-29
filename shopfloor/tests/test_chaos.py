@@ -235,6 +235,27 @@ async def test_s5_leak_retains_memory_per_request(stack: Stack) -> None:
     assert sum(len(b) for b in leaked) == 3 * 64 * 1024
 
 
+async def test_chaos_reset_releases_the_s5_leak(stack: Stack) -> None:
+    stack.inv_store.stock[1] = 1000
+    leaked = stack.apps["orders"].state.leaked
+    await set_flag(stack.orders, "orders.leak_kb_per_request", 64)
+    for _ in range(3):
+        await stack.orders.post("/orders", json=ORDER)
+    assert len(leaked) == 3
+    assert (await stack.orders.post("/admin/chaos/reset", headers=AUTH)).status_code == 200
+    assert leaked == []
+    assert stack.apps["orders"].state.runtime.get("orders.leak_kb_per_request") == 0
+
+
+async def test_leak_release_is_admin_only(stack: Stack) -> None:
+    stack.inv_store.stock[1] = 1000
+    leaked = stack.apps["orders"].state.leaked
+    await set_flag(stack.orders, "orders.leak_kb_per_request", 64)
+    await stack.orders.post("/orders", json=ORDER)
+    assert (await stack.orders.post("/admin/chaos/reset")).status_code == 401
+    assert len(leaked) == 1
+
+
 # ---- S6 / cache degradation ---------------------------------------------------------------
 
 
