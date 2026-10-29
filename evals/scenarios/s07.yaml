@@ -2,8 +2,15 @@ id: S7
 title: "Traffic spike, no bug"
 setup:
   chaos: {}  # load only, no flag
-# UNVALIDATED: this load profile is a guess; T-016 will measure and tune it.
-load: {rps: 300, duration_s: 300, cart_size: 1}
+# T-016 live runs (UNRESOLVED: does not fire reliably). The Python load generator is a single
+# process, so it tops out at 120-440 rps depending on host load, and orders (one uvicorn worker)
+# never got its 5m p95 over the 1s threshold: peaks 0.7-0.74s at 190-440 rps, 0.09s at ~290 rps on
+# an idle host, nothing fired in 300s in any of 5 runs (rps 300, 500, 1000). Only the 1m p95
+# briefly crossed 1s (1.76s) once, and the gateway 502'd ~2% of requests at 440 rps.
+# rps 500 is the highest the generator can pace without collapsing (100 workers = httpx pool).
+# The expected alert is kept as the capacity-fault signal; firing it needs a heavier generator
+# (multi-process / k6) or a lower orders capacity, see the T-016 PR notes.
+load: {rps: 500, duration_s: 300, cart_size: 1}
 expect:
   alerts:  # any-of
     - {alertname: HighLatencyP95, service: orders}

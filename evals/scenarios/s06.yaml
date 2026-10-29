@@ -1,11 +1,17 @@
 id: S6
 title: "Bad config push: unreachable Redis host"
 setup:
-  # UNVALIDATED until T-016's live run. SafeCache swallows Redis errors and a bad DNS name
-  # fails fast, so nothing would fire. A non-routable IP makes every cache call hit the
-  # connect timeout, which shows up as latency on orders (via the /products path).
+  # T-016 live run: a bad DNS name fails fast so nothing would fire; a non-routable IP makes
+  # every cache call hit the connect timeout. Observed: GET /products takes 50s+ in orders
+  # (get + set each time out, and requests queue), POST /orders also stalls past the gateway's
+  # 10s read timeout (gateway answers 502), so the generator sees ~1 rps and 0 successes.
+  # Orders only records a latency sample when a request finally completes, so its 5m p95
+  # (histogram top bucket, 10s) crosses 1s late, and HighLatencyP95/orders (for: 2m) did NOT
+  # fire inside the original 300s window (it fired about 6 minutes after the flag was set).
+  # Hence the longer window below. Only orders latency is the expected alert: HighErrorRate
+  # also fires on the gateway (502s) but not on orders, which logs 200s.
   chaos: {orders.redis_host: 10.255.255.1}
-load: {rps: 50, duration_s: 300, cart_size: 1}
+load: {rps: 50, duration_s: 600, cart_size: 1}
 expect:
   alerts:  # any-of
     - {alertname: HighLatencyP95, service: orders}
