@@ -1,8 +1,9 @@
 """T-051 live record driver. No network, no Docker: MockTransport and fakes."""
 
 import asyncio
+import dataclasses
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,8 @@ class FakeStack:
         self.rss_bytes: float = 100 * 1024 * 1024
         self.rss_status = 200
         self.rss_empty = False
+        self.rss_reads = 0
+        self.rss_blind_script: Callable[[int], bool] | None = None  # read number -> blind?
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         host, path = request.url.host, request.url.path
@@ -73,9 +76,11 @@ class FakeStack:
         if host == "am":
             return httpx.Response(200, json=self.am_alerts)
         if host == "prom" and path == "/api/v1/query":
+            self.rss_reads += 1
             if self.rss_status != 200:
                 return httpx.Response(self.rss_status)
-            result = [] if self.rss_empty else [{"value": [0, str(self.rss_bytes)]}]
+            blind = self.rss_blind_script(self.rss_reads) if self.rss_blind_script else False
+            result = [] if (self.rss_empty or blind) else [{"value": [0, str(self.rss_bytes)]}]
             return httpx.Response(200, json={"data": {"result": result}})
         if host == "prom":
             return httpx.Response(200, json={"data": {"alerts": self.prom_alerts}})
@@ -131,10 +136,11 @@ async def drive(
     source: IncidentSource,
     record: Any,
     state: DriveState | None = None,
+    cfg: DriveConfig = CFG,
 ) -> ScenarioOutcome:
     async with stack.client() as plain, stack.client() as admin:
         return await drive_scenario(
-            sc, record, cfg=CFG, admin=admin, plain=plain, incidents=source, state=state
+            sc, record, cfg=cfg, admin=admin, plain=plain, incidents=source, state=state
         )
 
 
@@ -658,8 +664,76 @@ async def test_rss_guard_fails_closed_when_prometheus_is_unusable(mode: str) -> 
     assert paths(stack)[-3:] == RESET
 
 
+def graced(grace_s: float) -> DriveConfig:
+    return dataclasses.replace(CFG, rss_blind_grace_s=grace_s)
+
+
+async def test_rss_blind_gap_shorter_than_grace_is_survived(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stack = FakeStack()
+    stack.rss_blind_script = lambda n: 2 <= n <= 6  # read 1 (start check) is good
+    src = FakeSource([incident("inc_1", ("HighErrorRate", "orders"))])
+
+    async def record(_: str) -> ScenarioOutcome:
+        await asyncio.sleep(0.3)
+        return outcome("S1")
+
+    with caplog.at_level("WARNING"):
+        await drive(stack, S1, src, record, cfg=graced(5.0))
+    assert any("RSS guard blind" in r.message for r in caplog.records)
+
+
+async def test_rss_blind_longer_than_grace_fails_and_tears_down() -> None:
+    stack = FakeStack()
+    stack.rss_blind_script = lambda n: n >= 2
+    with pytest.raises(OrdersRssGuardError, match="RSS_BLIND_GRACE_S"):
+        await drive(stack, S1, FakeSource(), never_record, cfg=graced(0.1))
+    assert paths(stack)[-3:] == RESET
+
+
+async def test_rss_good_read_resets_blind_clock() -> None:
+    stack = FakeStack()
+    # blind 4 polls, good, blind 4 polls, good...: each gap < grace, total blind time > grace
+    stack.rss_blind_script = lambda n: n >= 2 and (n - 2) % 5 != 4
+
+    async def record(_: str) -> ScenarioOutcome:
+        await asyncio.sleep(0.6)
+        return outcome("S1")
+
+    src = FakeSource([incident("inc_1", ("HighErrorRate", "orders"))])
+    await drive(stack, S1, src, record, cfg=graced(0.08))
+
+
+async def test_rss_blind_at_start_fails_closed_without_starting_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started_rps: list[float] = []
+    real_start = LoadGenerator.start
+
+    def spy(self: LoadGenerator) -> None:
+        started_rps.append(self._interval_s)
+        real_start(self)
+
+    monkeypatch.setattr(LoadGenerator, "start", spy)
+    stack = FakeStack()
+    stack.rss_empty = True
+    with pytest.raises(OrdersRssGuardError, match="no process_resident_memory_bytes"):
+        await drive(stack, S1, FakeSource(), never_record, cfg=graced(999.0))
+    assert 2 / S1.load.rps not in started_rps  # scenario load never started (teardown refill only)
+    assert paths(stack)[-3:] == RESET
+
+
 def test_drive_settings_default_rss_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("FIREBREAK_EVAL_DRIVE_MAX_ORDERS_RSS_MB", raising=False)
     assert DriveSettings(_env_file=None).max_orders_rss_mb == 2500  # type: ignore[call-arg]
     monkeypatch.setenv("FIREBREAK_EVAL_DRIVE_MAX_ORDERS_RSS_MB", "900")
     assert DriveSettings(_env_file=None).max_orders_rss_mb == 900  # type: ignore[call-arg]
+
+
+def test_drive_settings_rss_blind_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FIREBREAK_EVAL_DRIVE_RSS_BLIND_GRACE_S", raising=False)
+    assert DriveSettings(_env_file=None).rss_blind_grace_s == 180  # type: ignore[call-arg]
+    monkeypatch.setenv("FIREBREAK_EVAL_DRIVE_RSS_BLIND_GRACE_S", "30")
+    cfg = DriveConfig.from_settings(ToolSettings(), DriveSettings(_env_file=None))  # type: ignore[call-arg]
+    assert cfg.rss_blind_grace_s == 30
