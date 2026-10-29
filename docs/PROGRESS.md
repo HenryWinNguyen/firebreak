@@ -18,6 +18,14 @@ Repo: https://github.com/HenryWinNguyen/firebreak (public).
 - Findings: (1) the guard fails on any blind poll → **T-054** grace window. (2) the model wrote `level=error` as LogQL
   in S4 and S6 (Loki 400, no logs): the tool description doesn't name the labels → **T-055**. (3) S3 and S2 look the same
   in every orders metric → **T-056** `db_queries_total` (CONTRACTS §2.4 v1.1, additive).
+- **T-054** (#68): the RSS guard rides out a Prometheus blind window (grace 180 s,
+  `FIREBREAK_EVAL_DRIVE_RSS_BLIND_GRACE_S`) and still fails closed if blind at start (new sync check before load) or past
+  the grace. Review minors left open: the start check doesn't compare against the limit (the first guard poll does); the
+  real blind bound is ≈ grace + poll + HTTP timeout; two test assertions are timing-tight / indirect.
+- **T-055** (#66, 1 rework: said `warn`, but Shopfloor logs `warning`): `logql_query` description names the stream
+  selector, the labels `service`/`level` and two examples. Test guards both descriptions.
+- **T-056** (#67): orders exports `db_queries_total{service}` (2 per order, quantity+1 under N+1). Review minors left
+  open: failed round trips aren't counted (counted after the await); the lifespan wiring has no test (checked live on rebuild).
 - T-055 changes the tool list, which is part of every LLM step key, so all recordings get re-recorded after these merge.
   The first-pass recordings are not committed.
 

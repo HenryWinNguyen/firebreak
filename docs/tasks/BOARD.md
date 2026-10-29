@@ -34,9 +34,9 @@
 | T-051 | Live record driver + per-scenario errors | evals | sonnet | T-045, T-047, T-050 | merged | #59 |
 | T-052 | Make S5 (memory leak) safe for driven runs | evals | sonnet | T-051 | merged | #63 |
 | T-053 | S7 load capacity (multi-process load generator or k6) | target | sonnet | T-016 | pending | |
-| T-054 | RSS guard tolerates a short scrape gap (S6) | evals | sonnet | T-052 | ready | |
-| T-055 | logql_query description names the Loki labels | agents | sonnet | T-034 | ready | |
-| T-056 | `db_queries_total` so S3 is distinguishable from S2 | target | sonnet | T-012 | ready | |
+| T-054 | RSS guard tolerates a short scrape gap (S6) | evals | sonnet | T-052 | merged | #68 |
+| T-055 | logql_query description names the Loki labels | agents | sonnet | T-034 | merged | #66 |
+| T-056 | `db_queries_total` so S3 is distinguishable from S2 | target | sonnet | T-012 | merged | #67 |
 | T-049 | Local baseline run (`baseline-local`, $0) for CP1: S1–S6 after T-054/55/56; S7 after T-053 | evals | lead | T-047, T-016, T-050, T-051, T-054, T-055, T-056 | in-progress (lead) | |
 
 ```
