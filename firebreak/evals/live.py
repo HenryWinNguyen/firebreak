@@ -14,8 +14,12 @@ Per scenario (``drive_scenario``):
    ``load.hold: duration`` stops it after ``load.duration_s`` (the fault's effect persists).
    An RSS guard polls the orders ``process_resident_memory_bytes`` from Prometheus the whole
    time; above ``FIREBREAK_EVAL_DRIVE_MAX_ORDERS_RSS_MB`` it stops the load and fails the
-   scenario (``OrdersRssGuardError``). If the guard cannot read the metric it fails closed;
-   the driver never runs unguarded;
+   scenario (``OrdersRssGuardError``). The metric is read once, synchronously, before the load
+   starts; if that read fails the scenario fails closed (the driver never starts load
+   unguarded). After load has started, a failed read (a scrape gap marks the series stale) is
+   logged as a WARNING and polling continues; the guard fails closed only once it has been
+   blind for longer than ``FIREBREAK_EVAL_DRIVE_RSS_BLIND_GRACE_S`` (default 180s). A good read
+   resets the blind clock;
 4. poll the live DB, read-only, for an incident opened after step 2 that carries any of
    ``expect.alerts``;
 5. hand the incident id to ``record`` (the existing ``record_scenario``);
@@ -72,6 +76,10 @@ class OrdersRssGuardError(LiveDriveError):
     """The orders RSS guard tripped, or could not read the metric (it fails closed)."""
 
 
+class RssUnreadableError(OrdersRssGuardError):
+    """The orders RSS metric could not be read (HTTP error or no sample)."""
+
+
 RSS_METRIC = "process_resident_memory_bytes"  # the metric the HighMemory alert uses
 RSS_QUERY = f'{RSS_METRIC}{{job="orders"}}'
 
@@ -92,6 +100,7 @@ class DriveSettings(BaseSettings):
     max_concurrency: int = Field(default=50, ge=1)
     http_timeout_s: float = Field(default=15.0, gt=0)
     max_orders_rss_mb: float = Field(default=2500.0, gt=0)
+    rss_blind_grace_s: float = Field(default=180.0, gt=0)
 
 
 @dataclass(frozen=True)
@@ -107,6 +116,7 @@ class DriveConfig:
     clean_polls: int = 3
     max_concurrency: int = 50
     max_orders_rss_mb: float = 2500.0
+    rss_blind_grace_s: float = 180.0
 
     def service_url(self, service: str) -> str:
         urls = {"orders": self.orders_url, "inventory": self.inventory_url}
@@ -138,6 +148,7 @@ class DriveConfig:
             clean_polls=drive.clean_polls,
             max_concurrency=drive.max_concurrency,
             max_orders_rss_mb=drive.max_orders_rss_mb,
+            rss_blind_grace_s=drive.rss_blind_grace_s,
         )
 
 
@@ -433,18 +444,44 @@ async def orders_rss_mb(client: httpx.AsyncClient, cfg: DriveConfig) -> float:
         results = body["data"]["result"]
         values = [float(r["value"][1]) for r in results]
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
-        raise OrdersRssGuardError(
+        raise RssUnreadableError(
             f"RSS guard cannot read {RSS_METRIC} for orders from Prometheus: {_describe(exc)}"
         ) from exc
     if not values:
-        raise OrdersRssGuardError(f"RSS guard: Prometheus has no {RSS_METRIC} sample for orders")
+        raise RssUnreadableError(f"RSS guard: Prometheus has no {RSS_METRIC} sample for orders")
     return max(values) / (1024 * 1024)
 
 
 async def rss_guard(client: httpx.AsyncClient, cfg: DriveConfig) -> None:
-    """Poll orders RSS every poll interval; returns never, raises when over the limit or blind."""
+    """Poll orders RSS every poll interval; returns never.
+
+    Raises when over the limit (first read) or when blind for longer than
+    ``cfg.rss_blind_grace_s``. Every blind poll is logged; a good read resets the blind clock.
+    """
+    blind_since: float | None = None
     while True:
-        rss = await orders_rss_mb(client, cfg)
+        try:
+            rss = await orders_rss_mb(client, cfg)
+        except RssUnreadableError as exc:
+            now = time.monotonic()
+            if blind_since is None:
+                blind_since = now
+            blind_for = now - blind_since
+            if blind_for > cfg.rss_blind_grace_s:
+                raise OrdersRssGuardError(
+                    f"RSS guard blind for {blind_for:.0f}s, longer than the "
+                    f"{cfg.rss_blind_grace_s:g}s grace "
+                    f"(FIREBREAK_EVAL_DRIVE_RSS_BLIND_GRACE_S); last error: {exc}; load stopped"
+                ) from exc
+            logger.warning(
+                "RSS guard blind for %.0fs (grace %gs), still polling: %s",
+                blind_for,
+                cfg.rss_blind_grace_s,
+                exc,
+            )
+            await asyncio.sleep(cfg.poll_interval_s)
+            continue
+        blind_since = None
         if rss > cfg.max_orders_rss_mb:
             raise OrdersRssGuardError(
                 f"orders RSS {rss:.0f} MiB exceeds the limit of {cfg.max_orders_rss_mb:g} MiB "
@@ -675,6 +712,8 @@ async def drive_scenario(
         await apply_setup(admin, scenario, cfg)
         logger.info("scenario %s: applied; waiting for an incident", sid)
         # 3. load, guarded
+        # fail closed right away if the metric is unreadable: never start load unguarded
+        await orders_rss_mb(plain, cfg)
         guard = asyncio.create_task(rss_guard(plain, cfg))
         timer: asyncio.Task[None] | None = None
         gen.start()
