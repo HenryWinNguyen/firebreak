@@ -9,6 +9,7 @@ are a checkpoint.
 |---|---|---|
 | v1 | 2026-10-27 | Initial: models, Shopfloor API/metrics/logs/alerts, webhook, ports |
 | v1.2 | 2026-10-27 | `GroupingDecision.incident_id` is `str \| None` (T-021 request); resolved-alert write path (T-025/T-027) |
+| v1.5 | 2026-10-29 | Additive: Shopfloor metric `db_queries_total{service}` (T-056) |
 | v1.1 | 2026-10-27 | Additive (T-032 requests): `AgentRunResult.error`, `LLMRequest.fallback_model`; `Evidence.raw_ref` ownership rule |
 
 ---
@@ -81,6 +82,7 @@ The admin endpoints need the header `Authorization: Bearer $SHOPFLOOR_ADMIN_TOKE
 | `http_request_duration_seconds` | histogram | `service, route` |
 | `db_pool_in_use` | gauge | `service` |
 | `db_pool_size` | gauge | `service` |
+| `db_queries_total` | counter | `service` (one per DB round trip; v1.5, T-056) |
 | `app_info` | gauge (=1) | `service, version` |
 | `process_resident_memory_bytes` | gauge | (prometheus_client default) |
 
