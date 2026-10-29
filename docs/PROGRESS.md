@@ -25,6 +25,17 @@ Repo: https://github.com/HenryWinNguyen/firebreak (public).
 ## Log
 
 ### 2026-10-28: M4 eval harness
+- **T-016** (#61, 1 rework): live validation of S5–S7 (no LLM). S5 HighMemory/orders fires at 216 s (peak 1143 MiB);
+  S6 fires at 321 s with its window widened to 600 s (orders only records latency when slow requests finish); **S7
+  never fired** in 5 runs (the single-process Python load generator tops out at ~120–440 rps; orders p95 peaked at
+  0.74 s) → xfail via `known_unfired`, follow-up T-053. Rework: the S5 restart looked the container up by directory
+  name and could silently restart nothing from another checkout; it now finds it by compose labels (exactly one
+  match) and verifies `State.StartedAt` changed.
+- **T-052** (#63, 0 blocking): S5 is safe to drive. Orders' chaos reset frees the leak buffer; `load.hold: duration`
+  (S5 stops load after 300 s, ~1.6–1.9 GB); an orders RSS guard (`process_resident_memory_bytes{job="orders"}`,
+  default 2500 MB, fails closed) cancels the investigation and tears down. Needs the orders image rebuilt before a
+  live S5 run. Backlog: guard task created before `gen.start()`; narrow `uncancel()` window; ~25% guard margin if a
+  faster load generator lands.
 - **T-051** (#59, Opus review 0 blocking + 4 pre-merge fixes): `run --mode record --agent NAME --drive` applies each
   scenario's faults via the Shopfloor admin API, runs bounded closed-loop load, waits for the matching incident
   (opened after apply; alertname + service), records, and always resets (shielded from cancellation). Any firing or
