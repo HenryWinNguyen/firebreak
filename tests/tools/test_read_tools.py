@@ -114,6 +114,14 @@ def test_registers_exactly_six_read_tools() -> None:
         assert tool is not None and tool.access is ToolAccess.READ
 
 
+def test_logql_description_documents_stream_selector() -> None:
+    reg = build_read_registry(ToolSettings(), _dummy_adapters(), clock=lambda: NOW)
+    spec = reg.specs(["logql_query"])[0]
+    assert '{service="orders", level="error"}' in spec.description
+    assert "stream selector" in spec.description
+    assert "gateway" in spec.description and "level" in spec.description
+
+
 def _dummy_adapters() -> ReadAdapters:
     t = httpx.MockTransport(Backend())
     return ReadAdapters(

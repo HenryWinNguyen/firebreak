@@ -67,7 +67,13 @@ class ListMetricsArgs(BaseModel):
 
 class LogqlQueryArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    query: str = Field(min_length=1, max_length=2000, description="LogQL expression")
+    query: str = Field(
+        min_length=1,
+        max_length=2000,
+        description=(
+            'LogQL; must start with a stream selector, e.g. {service="orders", level="error"}'
+        ),
+    )
     minutes_back: int = Field(default=15, ge=1, le=120)
     limit: int = Field(default=100, ge=1, le=500)
 
@@ -350,7 +356,10 @@ def build_read_registry(
     )
     add(
         "logql_query",
-        "Run a LogQL query against Loki over the last minutes_back minutes.",
+        "Run a LogQL query against Loki over the last minutes_back minutes. The query must start "
+        "with a stream selector in braces; bare filters like level=error are invalid. Labels: "
+        "service (gateway, orders, inventory), level (e.g. error, warn, info). Examples: "
+        '{service="orders", level="error"} or {service="gateway"} |= "timeout".',
         LogqlQueryArgs,
         logql_query,
     )
