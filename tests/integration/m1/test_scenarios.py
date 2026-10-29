@@ -26,6 +26,7 @@ import pytest
 
 from firebreak.evals.scenario import Scenario as YamlScenario
 from firebreak.evals.scenario import load_scenario
+from tests.integration.m1.docker_restart import restart_service
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCENARIO_DIR = Path(__file__).resolve().parents[3] / "evals" / "scenarios"
@@ -187,20 +188,9 @@ SCENARIOS += [yaml_scenario(f) for f in ("s05", "s06", "s07")]
 
 
 async def restart_services(client: httpx.AsyncClient, services: tuple[str, ...]) -> None:
-    """`docker compose restart` (the real remediation for a leak), then wait for /healthz."""
+    """Restart by compose label (verified via StartedAt), then wait for /healthz."""
     for svc in services:
-        proc = await asyncio.create_subprocess_exec(
-            "docker",
-            "compose",
-            "restart",
-            svc,
-            cwd=REPO_ROOT,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        out, _ = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(f"docker compose restart {svc} failed: {out.decode()}")
+        await restart_service(svc)
         deadline = time.monotonic() + 60
         while True:
             try:
@@ -302,7 +292,8 @@ class LoadGen:
             else:
                 # Paced: each worker owns an rps/concurrency share. Schedule against the clock
                 # so request latency does not slow the rate (until workers saturate).
-                next_at += self.concurrency / self.rps
+                # Clamp catch-up to 1s so a long stall does not release a burst.
+                next_at = max(next_at + self.concurrency / self.rps, time.monotonic() - 1.0)
                 await asyncio.sleep(max(0.0, next_at - time.monotonic()))
 
     async def start(self) -> None:
@@ -415,10 +406,18 @@ async def run_scenario(sc: Scenario) -> Result:
             await sc.apply(client)
             async with load(sc.concurrency, sc.quantity, pause_s=0.1, rps=sc.rps) as gen:
                 while time.monotonic() - start < sc.fire_timeout_s:
-                    rss = await orders_rss_mb(client)
-                    result.peak_rss_mb = max(result.peak_rss_mb or 0.0, rss)
-                    if rss > RSS_ABORT_MB:
-                        raise RuntimeError(f"{sc.sid}: orders RSS {rss:.0f} MiB > {RSS_ABORT_MB}")
+                    try:
+                        rss = await orders_rss_mb(client)
+                    except httpx.HTTPError:
+                        if sc.restart:  # S5 is the memory scenario: a missing sample is fatal
+                            raise
+                        LOG.exception("%s: skipping RSS sample", sc.sid)
+                    else:
+                        result.peak_rss_mb = max(result.peak_rss_mb or 0.0, rss)
+                        if rss > RSS_ABORT_MB:
+                            raise RuntimeError(
+                                f"{sc.sid}: orders RSS {rss:.0f} MiB > {RSS_ABORT_MB}"
+                            )
                     hit = (await firing(client, since=applied_at)) & set(sc.expected)
                     if hit:
                         result.seconds = time.monotonic() - start
@@ -476,5 +475,5 @@ def test_scenario_fires_expected_alert(sc: Scenario, stack_ready: None) -> None:
     if result.seconds is None and sc.known_unfired:
         pytest.xfail(sc.known_unfired)
     assert result.seconds is not None, (
-        f"{sc.sid} ({sc.name}): none of {sc.expected} fired within {FIRE_TIMEOUT_S}s"
+        f"{sc.sid} ({sc.name}): none of {sc.expected} fired within {sc.fire_timeout_s}s"
     )
