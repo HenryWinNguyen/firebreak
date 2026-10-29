@@ -18,6 +18,14 @@ class PricingError(LLMError):
     """No price is configured for a model. Cost is never guessed."""
 
 
+class UnknownModelError(PricingError):
+    """A request named a model that is not in pricing.yaml, so it cannot be routed or priced."""
+
+
+class LLMConnectionRefused(LLMError):
+    """The server could not be reached at all (nothing listening). Not retried."""
+
+
 class FixtureMissing(LLMError):
     """Replay mode found no fixture for this request. `key` is the sha256 fixture key."""
 

@@ -4,9 +4,11 @@
 # Cache writes are the 5-minute TTL rate (what `cache_control: ephemeral` uses).
 # Haiku 5.5 has a higher tier for prompts over 100,000 tokens
 # (prompt = input + cache read + cache write tokens). `max_prompt_tokens: null` = no upper bound.
+# Each model must set `provider: anthropic | openai_compat` (no default).
 # Do not edit prices without re-checking the source URL.
 models:
   claude-opus-5-5:
+    provider: anthropic
     tiers:
       - max_prompt_tokens: null
         input: 4.00
@@ -14,6 +16,7 @@ models:
         cache_read: 0.20
         output: 20.00
   claude-sonnet-5-5:
+    provider: anthropic
     tiers:
       - max_prompt_tokens: null
         input: 2.00
@@ -21,6 +24,7 @@ models:
         cache_read: 0.10
         output: 10.00
   claude-haiku-5-5:
+    provider: anthropic
     tiers:
       - max_prompt_tokens: 100000
         input: 0.10
@@ -32,3 +36,13 @@ models:
         cache_write: 0.625
         cache_read: 0.05
         output: 2.50
+  # Local model served by Ollama (OpenAI-compatible API). Runs on this machine, so it is free:
+  # every price is 0.0. The cost cap in the agent config stays as a guard.
+  qwen3:8b:
+    provider: openai_compat
+    tiers:
+      - max_prompt_tokens: null
+        input: 0.0
+        cache_write: 0.0
+        cache_read: 0.0
+        output: 0.0

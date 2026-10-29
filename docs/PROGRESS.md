@@ -3,23 +3,81 @@
 Reverse-chronological log of milestones. See [SCOPE.md](../SCOPE.md) for the
 milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 
-## ⏸ Waiting on Henry: paid live run for M3 (T-042)
+## ⏸ Waiting on Henry: install Ollama (free local baseline run for CP1)
 
-**Question:** OK to run the single-agent baseline against live scenarios S1–S7 with real Claude API calls?
+**Decision (Henry, 2026-10-28):** keep the Claude path working but **don't spend for now**. The paid Claude run
+(T-042) is **optional/deferred**; nothing else is blocked on it. CP1 uses same-model scores from the free local model.
 
-- **Needs from you:** `ANTHROPIC_API_KEY=` in `.env` (currently empty), and an OK on spend.
-- **Spend:** each investigation is hard-capped at $0.50 (`budget_usd`), so a full S1–S7 run is ≤ $3.50; ≤ 1 re-run planned (≤ $7 total).
-- **Options:** (a) go as specced (Sonnet 5.5, Haiku 5.5 fallback); (b) a cheaper smoke run first (S1 only, ≤ $0.50); (c) hold.
-- **Recommendation:** (b) then (a): one scenario confirms the wiring end to end before spending on all seven.
-- **Timing:** the full run should happen after T-044/T-045 (record/replay), so the recordings can be replayed for $0 in CI. A $0.50 S1 smoke run can happen any time.
-- **Not blocked meanwhile:** M4 eval-harness work that runs on replay fixtures (no spend) continues.
+- **Needs from you:** Ollama is installed and `qwen3:8b` is pulled. Restart the server with a 32k context:
+  `OLLAMA_CONTEXT_LENGTH=32768 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 ollama serve`. Tell the lead when done.
+- **Then the lead runs (T-049, $0):** the `FIREBREAK_OLLAMA=1` integration test once, then
+  `python -m firebreak.evals run --mode record --agent baseline-local` on S1–S7, then `make eval` → REPORT.md.
+- **If you decide to pay later:** $5 prepaid Console credits (auto-reload off), key in `.env`, and a go-ahead at
+  run time. It adds a Claude column to the report; nothing is rebuilt.
+- **Optional free upgrade:** a Groq free-tier account would allow a larger hosted open model ($0, ~1,000 req/day).
+- **Not blocked meanwhile:** all other work continues on fakes and replays at $0.
 
 ## Current status
 
-**M2 done. M3 code done; live acceptance (T-042) waits on Henry.** M1 done. CP0 passed 2026-10-27. Board: `docs/tasks/BOARD.md`.
+**M2 done. M3 code done. M4 eval harness done (scenarios, grader, record/replay, runner); recordings wait on the local baseline run (T-049; Henry installs Ollama). Paid Claude run optional. T-016 (live S5–S7) in progress.** M1 done. CP0 passed 2026-10-27. Board: `docs/tasks/BOARD.md`.
 Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
 ## Log
+
+### 2026-10-28: M4 eval harness
+- **T-051** (#59, Opus review 0 blocking + 4 pre-merge fixes): `run --mode record --agent NAME --drive` applies each
+  scenario's faults via the Shopfloor admin API, runs bounded closed-loop load, waits for the matching incident
+  (opened after apply; alertname + service), records, and always resets (shielded from cancellation). Any firing or
+  pending alert counts as a dirty stack; a clear timeout fails the run (sticky); crashed load workers restart and an
+  unhealthy load fails the scenario. One scenario's error no longer aborts the batch; exit code 1 on any error.
+  Lead confirmed against Ollama: history with malformed tool args echoed as `{}` → 200, raw invalid JSON → 400
+  (the T-047 review's blocking finding was real). Backlog: reset an inventory deploy too (no scenario uses one yet).
+- **T-050** (#56): Ollama silently truncates prompts beyond `OLLAMA_CONTEXT_LENGTH` (default 4096). The
+  OpenAI-compatible client now refuses a prompt that can't fit (`FIREBREAK_LLM_OPENAI_CONTEXT_TOKENS`, default 32768,
+  must match the server) and raises `ContextOverflowError` when reply usage shows near-full context; never retried,
+  never falls back. Lead added a warning when a reply carries no usage. Henry installed Ollama; `qwen3:8b` pulled.
+  Note: an LLM error aborts the whole record run (not just the scenario), so local runs go one scenario at a time.
+  Backlog: record a per-scenario error and continue instead.
+- **T-048** (#53): spend gate. `python -m firebreak.agents.baseline [--agent NAME]` refuses (exit 2, before any client,
+  engine or adapter is built) unless `FIREBREAK_EVAL_LIVE=1`, plus `ANTHROPIC_API_KEY` when the config routes to
+  Anthropic; replay is exempt. The OpenAI-compatible key is now in the recording secret scan. No remaining path
+  reaches a paid provider without the opt-in.
+  Backlog: an invalid `FIREBREAK_LLM_MODE` prints a traceback (fails closed) instead of exit 2; tests for record mode
+  without opt-in and an invalid mode; the refusal text says "record mode" for CLI runs too.
+- **T-047** (#49, 1 rework, Opus review): hybrid model plan. `OpenAICompatLLMClient` (Ollama / any OpenAI-compatible
+  server) translates the Anthropic-shaped contract internally; `RoutingLLMClient` picks the provider per model from
+  `pricing.yaml` (`provider` required; unknown model = typed error, never a default to Anthropic). `baseline-local`
+  (Qwen3 8B, same prompt/tools) runs via `python -m firebreak.evals run --agent baseline-local`; it needs only
+  `FIREBREAK_EVAL_LIVE=1`, never an Anthropic key. Malformed tool args reach the gateway as `invalid_args` and are
+  echoed to the server as `{}`. `investigate()` takes `config_path` (lead grant #50).
+  Backlog: the baseline CLI (`python -m firebreak.agents.baseline`) can reach Anthropic without `FIREBREAK_EVAL_LIVE`
+  (pre-existing; add a live gate); add `openai_api_key` to the recording secret scan; confirm against a real Ollama
+  that malformed history is accepted (run the `FIREBREAK_OLLAMA=1` integration test once installed).
+- **T-015** (#46): Alertmanager webhook token file is 0600 (verified in the pinned image); `honor_labels: true` removes the
+  spurious `exported_service` label (Shopfloor exports no `job`/`instance`, so routing, grouping and ingest are
+  unchanged); promtool tests moved to `ops/prometheus/tests/` with below-threshold and `for:`-pending cases per rule.
+  Backlog: pair each pending case with a later `eval_time` that asserts the fire.
+- **T-043** (#37, 1 rework): scenarios S1–S7 (`evals/scenarios/`) + deterministic grader (top-1/top-3, cited evidence kinds, report validity).
+- **T-044** (#40, Opus, 0 blocking): record/replay cassettes for LLM + tool calls. Replay has no live fallback; stale
+  recordings raise `StaleRecordingError` naming the first difference. 20× round trip + 20× random-latency runs identical.
+  Lead decision: untrusted-block nonces stay random in all modes (seeding them would make the injection boundary
+  predictable during live recording); `fixture_key` normalizes them instead.
+- **T-046** (#42, Opus, 0 blocking): nonce normalization anchored to real wrapper tags; secret scan adds base64/URL forms
+  and warns on short secrets; crash-safe overwrite; unconsumed recorded tool calls are stale; the gateway assigns
+  evidence ids at call start.
+- **T-045** (#43, 2 rework rounds, Opus re-reviews): `python -m firebreak.evals run|report`, `make eval`, `eval_runs`/
+  `eval_results` (migration 0002), `evals/REPORT.md`. Review caught a data-loss bug: replay purged the recorded
+  incident in the **dev** DB. Fixed: evals use only a dedicated `firebreak_eval` DB, and every write path checks
+  `current_database()` after connecting (a `?database=` URL override bypassed the name-only check in round 1); the purge
+  touches only rows listed in the recording and aborts on extra/shared links; record mode refuses eval DB == live DB.
+  `make eval` exits 1 ("no recordings found") until T-042 records.
+- Lead fix (#44): the test fixture's `_test` guard (it runs `DROP SCHEMA`) had the same `?database=` bypass; it now
+  rejects the parameter and re-checks `current_database()` before dropping.
+- Backlog (M10 hardening): secret scan misses a secret embedded inside a larger base64 blob (e.g. Basic auth) and
+  `quote()`-with-`/`/lowercase-`%2b` forms; a hard kill mid-overwrite leaves the old recording in a hidden dir with no
+  recovery, and crashed-run staging dirs accumulate; partial-consumption replay test; `run.json` written outside the
+  `record_run` staging dir; same-DB detection misses socket-vs-TCP to one server (compare `system_identifier`);
+  `?options=` raises a raw `TypeError`; fixed test DB names collide across concurrent local runs.
 
 ### 2026-10-28: M1 acceptance + live M2 reproduction
 - **T-014** (#20, 1 rework): S1–S4 each fire the expected alert on the live stack and clear after reset

@@ -1,11 +1,12 @@
 """Cost math from `pricing.yaml`."""
 
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel
 
-from firebreak.llm.errors import PricingError
+from firebreak.llm.errors import PricingError, UnknownModelError
 from firebreak.models.llm import Usage
 
 _MTOK = 1_000_000
@@ -19,7 +20,11 @@ class PriceTier(BaseModel):
     output: float
 
 
+Provider = Literal["anthropic", "openai_compat"]
+
+
 class ModelPricing(BaseModel):
+    provider: Provider  # required: a model with no provider is never guessed
     tiers: list[PriceTier]
 
 
@@ -29,6 +34,16 @@ class PricingTable(BaseModel):
     @classmethod
     def load(cls, path: Path) -> "PricingTable":
         return cls.model_validate(yaml.safe_load(path.read_text()))
+
+    def provider_for(self, model: str) -> Provider:
+        """The provider that serves ``model``. An unlisted model is an error, never a default."""
+        pricing = self.models.get(model)
+        if pricing is None:
+            raise UnknownModelError(
+                f"model {model!r} is not in pricing.yaml, so it has no provider or price; "
+                "add it there (with a provider) before using it"
+            )
+        return pricing.provider
 
     def cost_usd(self, model: str, usage: Usage) -> float:
         pricing = self.models.get(model)

@@ -31,8 +31,18 @@ SKIP_REASON = (
 
 
 def _require_test_database(url: str) -> None:
-    """Hard error unless the database name ends in ``_test`` (the fixture runs DROP SCHEMA)."""
-    name = make_url(url).database or ""
+    """Hard error unless the database name ends in ``_test`` (the fixture runs DROP SCHEMA).
+
+    A ``database``/``dbname`` query parameter would override the path name at connect time,
+    so it is refused outright; ``_migrate`` also re-checks ``current_database()`` after connecting.
+    """
+    parsed = make_url(url)
+    if {"database", "dbname"} & {k.lower() for k in parsed.query}:
+        raise RuntimeError(
+            "refusing to run: FIREBREAK_TEST_DATABASE_URL must not set the database in its "
+            "query string; put it in the path"
+        )
+    name = parsed.database or ""
     if not name.endswith("_test"):
         raise RuntimeError(
             f"refusing to run: FIREBREAK_TEST_DATABASE_URL database {name!r} must end in "
@@ -58,6 +68,9 @@ async def _migrate(url: str) -> None:
     engine = create_async_engine(url, poolclass=NullPool)
     try:
         async with engine.begin() as conn:
+            actual = (await conn.execute(text("SELECT current_database()"))).scalar_one()
+            if not str(actual).endswith("_test"):
+                raise RuntimeError(f"refusing to DROP SCHEMA: connected to {actual!r}, not *_test")
             await conn.execute(text("DROP SCHEMA public CASCADE"))
             await conn.execute(text("CREATE SCHEMA public"))
             await conn.run_sync(_upgrade)

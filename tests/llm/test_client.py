@@ -26,6 +26,7 @@ from firebreak.llm import (
     PricingTable,
     RecordingLLMClient,
     ReplayLLMClient,
+    RoutingLLMClient,
     TokenBucket,
     build_llm_client,
     fixture_key,
@@ -368,7 +369,7 @@ def test_build_client_modes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     rec = build_llm_client(LLMSettings(mode=LLMMode.RECORD, fixture_dir=tmp_path))
     assert isinstance(rec, RecordingLLMClient)
     live = build_llm_client(LLMSettings(mode=LLMMode.LIVE))
-    assert isinstance(live, AnthropicLLMClient)
+    assert isinstance(live, RoutingLLMClient)  # picks Anthropic or openai_compat per model
 
 
 def test_mode_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:

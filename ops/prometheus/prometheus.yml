@@ -11,16 +11,21 @@ alerting:
         - targets: ["alertmanager:9093"]
 
 # Shopfloor services (CONTRACTS 2.1). Targets stay down until they are up.
+# Services export their own `service` label on every metric; honor_labels keeps
+# it instead of renaming it to `exported_service` (the target label has the same value).
 scrape_configs:
   - job_name: gateway
+    honor_labels: true
     static_configs:
       - targets: ["gateway:8100"]
         labels: { service: gateway }
   - job_name: orders
+    honor_labels: true
     static_configs:
       - targets: ["orders:8101"]
         labels: { service: orders }
   - job_name: inventory
+    honor_labels: true
     static_configs:
       - targets: ["inventory:8102"]
         labels: { service: inventory }

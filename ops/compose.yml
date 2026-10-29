@@ -20,6 +20,7 @@ services:
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
+        umask 077
         printf '%s' "$$FIREBREAK_WEBHOOK_TOKEN" > /tmp/webhook_token
         exec /bin/alertmanager --config.file=/etc/alertmanager/alertmanager.yml --storage.path=/alertmanager
     environment:

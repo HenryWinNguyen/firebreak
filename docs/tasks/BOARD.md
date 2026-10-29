@@ -8,8 +8,8 @@
 | T-012 | Chaos flags + faults S1–S6 (+ T-011 review follow-ups) | target | sonnet | T-011 | merged | #12 |
 | T-013 | Observability stack + alert rules | target | sonnet | — | merged | #10 |
 | T-014 | M1 acceptance: S1–S4 alerts | target | sonnet | T-012, T-013 | merged | #20 |
-| T-015 | Observability follow-ups (T-013 minors) | target | sonnet | T-013, T-014 | ready | |
-| T-016 | Live validation of S5–S7 (tune scenario files) | target | sonnet | T-043 | pending | |
+| T-015 | Observability follow-ups (T-013 minors) | target | sonnet | T-013, T-014 | merged | #46 |
+| T-016 | Live validation of S5–S7 (tune scenario files) | target | sonnet | T-043 | in-progress |  |
 | T-022 | Persistence layer | core | sonnet | — | merged | #4 |
 | T-025 | Persistence hardening (T-022 review follow-ups) | core | sonnet | — | merged | #18 |
 | T-026 | Grouper onto shared repo methods + tests | core | sonnet | T-025 | merged | #21 |
@@ -23,10 +23,16 @@
 | T-034 | Read tools (Prometheus, Loki, deploys, service graph) | agents | sonnet | T-032 | merged | #28 |
 | T-035 | Read-tool hardening (T-034 minors) | agents | sonnet | T-034 | merged | #31 |
 | T-041 | Single-agent baseline (config, prompt, runner, CLI) | agents | sonnet | T-033, T-034 | merged | #32 |
-| T-042 | M3 acceptance: live S1–S7 (**paid, needs Henry**) | evals | sonnet | T-014, T-041, T-044, T-045 | **waiting on Henry** |  |
-| T-043 | Eval scenarios S1–S7 + deterministic grader | evals | sonnet | T-041 | rework | #37 |
-| T-044 | Record/replay cassettes (tools + LLM, deterministic) | evals | **opus** (high risk) | T-041 | in-progress | |
-| T-045 | Eval runner, results tables, `make eval`, REPORT.md | evals | sonnet | T-043, T-044 | pending | |
+| T-042 | M3 acceptance on Claude (paid, **optional**: Henry deciding) | evals | sonnet | T-014, T-041, T-044, T-045 | deferred (optional) |  |
+| T-043 | Eval scenarios S1–S7 + deterministic grader | evals | sonnet | T-041 | merged | #37 |
+| T-044 | Record/replay cassettes (tools + LLM, deterministic) | evals | **opus** (high risk) | T-041 | merged | #40 |
+| T-045 | Eval runner, results tables, `make eval`, REPORT.md | evals | sonnet | T-043, T-044 | merged | #43 |
+| T-046 | Record/replay hardening + evidence ids at call start | evals | sonnet | T-044 | merged | #42 |
+| T-047 | OpenAI-compatible client (local Ollama) + baseline-local (hybrid) | agents | sonnet | T-045, T-046 | merged | #49 |
+| T-048 | Baseline CLI spend gate + OpenAI key in secret scan | agents | sonnet | T-047 | merged | #53 |
+| T-050 | Context-overflow guard for local models | agents | sonnet | T-047 | merged | #56 |
+| T-051 | Live record driver + per-scenario errors | evals | sonnet | T-045, T-047, T-050 | merged | #59 |
+| T-049 | Local baseline run S1–S7 (`baseline-local`, $0) for CP1 | evals | lead | T-047, T-016, T-050, T-051 | ready (waits for T-016 to free the stack) | |
 
 ```
 T-011 ─► T-012 ─┐

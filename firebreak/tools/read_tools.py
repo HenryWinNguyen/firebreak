@@ -15,6 +15,7 @@ from typing import Literal
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from firebreak.ingest.service_graph import ServiceGraph
+from firebreak.models.common import utcnow
 from firebreak.models.evidence import EvidenceKind
 from firebreak.models.llm import ToolAccess
 from firebreak.tools.adapters.loki import LogResult, LogsAdapter, LokiAdapter
@@ -41,10 +42,6 @@ _MAX_LINE_CHARS = 400
 _POINT_STEPS = (10_000, 60, 30, 15, 8, 4, 2, 1)
 
 Service = Literal["gateway", "orders", "inventory"]
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 # --- args -------------------------------------------------------------------------------
@@ -228,7 +225,8 @@ def build_read_registry(
     (``await adapters.aclose()``); ``build_default_adapters(settings)`` makes the real ones.
     """
     ad = adapters
-    now = clock or _utc_now
+    # Default to the shared clock so `deterministic()` freezes the query windows (replay).
+    now = clock or utcnow
 
     def utc_now() -> datetime:
         t = now()

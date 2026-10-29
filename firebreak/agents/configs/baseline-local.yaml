@@ -1,0 +1,16 @@
+# Local-model twin of baseline (T-047): identical prompt, tools and limits; only the model differs.
+# Cost is $0 (Ollama); budget_usd stays as a guard. Recordings go under evals/recordings/baseline-local/.
+name: baseline-local
+model: qwen3:8b
+system_prompt: baseline.md
+tools:
+  - promql_query
+  - promql_range
+  - list_metrics
+  - logql_query
+  - recent_deploys
+  - service_graph
+max_steps: 16
+max_output_tokens: 4096
+budget_usd: 0.50
+output_schema: InvestigationReport
