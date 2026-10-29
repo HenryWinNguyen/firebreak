@@ -28,6 +28,10 @@ class Metrics:
             "db_pool_in_use", "DB connections in use", ["service"], registry=self.registry
         )
         self.pool_size = Gauge("db_pool_size", "DB pool size", ["service"], registry=self.registry)
+        self.db_queries = Counter(
+            "db_queries_total", "DB round trips", ["service"], registry=self.registry
+        )
+        self.db_queries.labels(service)  # initialise so it reads 0 before any traffic
         self.pool_in_use.labels(service).set(0)
         self.pool_size.labels(service).set(0)
         self._info = Gauge(

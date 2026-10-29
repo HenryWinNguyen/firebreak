@@ -60,9 +60,15 @@ class OrderStore:
         self,
         pool: BoundedPool,
         sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
+        queries: Any = None,
     ) -> None:
         self.pool = pool
         self._sleep = sleep  # injectable so tests can assert simulated query time
+        self._queries = queries  # optional counter child: one inc per DB round trip
+
+    def _count_query(self) -> None:
+        if self._queries is not None:
+            self._queries.inc()
 
     async def init_schema(self) -> None:
         async with self.pool.acquire() as conn:
@@ -74,17 +80,21 @@ class OrderStore:
                 # S3: one lookup round trip per item instead of one for the whole cart.
                 for _ in range(quantity):
                     await conn.fetchval("SELECT 1")
+                    self._count_query()
                     await self._sleep(ITEM_QUERY_SECONDS)
             else:
                 await conn.fetchval("SELECT 1")
+                self._count_query()
                 await self._sleep(ORDER_WORK_SECONDS)
-            return int(
+            order_id = int(
                 await conn.fetchval(
                     "INSERT INTO orders (product_id, quantity) VALUES ($1, $2) RETURNING id",
                     product_id,
                     quantity,
                 )
             )
+            self._count_query()
+            return order_id
 
 
 class PricingBugError(RuntimeError):
@@ -223,7 +233,10 @@ def create_app(
         app.state.inventory = client
         if store is None:
             raw = await create_raw_pool(RAW_POOL_MAX)
-            app.state.store = OrderStore(BoundedPool(raw, pool_size_fn(runtime)))
+            app.state.store = OrderStore(
+                BoundedPool(raw, pool_size_fn(runtime)),
+                queries=app.state.metrics.db_queries.labels(app.state.metrics.service),
+            )
             await app.state.store.init_schema()
         else:
             app.state.store = store
