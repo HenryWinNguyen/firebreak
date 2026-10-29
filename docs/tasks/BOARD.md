@@ -9,7 +9,7 @@
 | T-013 | Observability stack + alert rules | target | sonnet | — | merged | #10 |
 | T-014 | M1 acceptance: S1–S4 alerts | target | sonnet | T-012, T-013 | merged | #20 |
 | T-015 | Observability follow-ups (T-013 minors) | target | sonnet | T-013, T-014 | merged | #46 |
-| T-016 | Live validation of S5–S7 (tune scenario files) | target | sonnet | T-043 | in-progress |  |
+| T-016 | Live validation of S5–S7 (tune scenario files) | target | sonnet | T-043 | merged | #61 |
 | T-022 | Persistence layer | core | sonnet | — | merged | #4 |
 | T-025 | Persistence hardening (T-022 review follow-ups) | core | sonnet | — | merged | #18 |
 | T-026 | Grouper onto shared repo methods + tests | core | sonnet | T-025 | merged | #21 |
@@ -32,7 +32,7 @@
 | T-048 | Baseline CLI spend gate + OpenAI key in secret scan | agents | sonnet | T-047 | merged | #53 |
 | T-050 | Context-overflow guard for local models | agents | sonnet | T-047 | merged | #56 |
 | T-051 | Live record driver + per-scenario errors | evals | sonnet | T-045, T-047, T-050 | merged | #59 |
-| T-052 | Make S5 (memory leak) safe for driven runs | evals | sonnet | T-051 | in-progress | |
+| T-052 | Make S5 (memory leak) safe for driven runs | evals | sonnet | T-051 | merged | #63 |
 | T-053 | S7 load capacity (multi-process load generator or k6) | target | sonnet | T-016 | pending | |
 | T-049 | Local baseline run (`baseline-local`, $0) for CP1: S1–S4, S6 now; S5 after T-052; S7 after T-053 | evals | lead | T-047, T-016, T-050, T-051 | in-progress (lead) | |
 
