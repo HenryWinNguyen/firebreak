@@ -358,7 +358,7 @@ def build_read_registry(
         "logql_query",
         "Run a LogQL query against Loki over the last minutes_back minutes. The query must start "
         "with a stream selector in braces; bare filters like level=error are invalid. Labels: "
-        "service (gateway, orders, inventory), level (e.g. error, warn, info). Examples: "
+        "service (gateway, orders, inventory), level (error, warning, info). Examples: "
         '{service="orders", level="error"} or {service="gateway"} |= "timeout".',
         LogqlQueryArgs,
         logql_query,

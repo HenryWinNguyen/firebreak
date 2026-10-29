@@ -120,6 +120,9 @@ def test_logql_description_documents_stream_selector() -> None:
     assert '{service="orders", level="error"}' in spec.description
     assert "stream selector" in spec.description
     assert "gateway" in spec.description and "level" in spec.description
+    assert "warning" in spec.description and "warn," not in spec.description
+    q_desc = spec.input_schema["properties"]["query"]["description"]
+    assert '{service="orders", level="error"}' in q_desc
 
 
 def _dummy_adapters() -> ReadAdapters:
