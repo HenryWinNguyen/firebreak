@@ -51,6 +51,7 @@ async def test_metrics_names_and_labels(stack: Stack) -> None:
     assert 'app_info{service="orders",version="1.0.0"} 1.0' in text
     assert 'db_pool_size{service="orders"} 20.0' in text
     assert 'db_pool_in_use{service="orders"} 0.0' in text
+    assert 'db_queries_total{service="orders"} 0.0' in text
     # route is the template, never the raw path
     await stack.inventory.get("/healthz")
     inv = (await stack.inventory.get("/metrics")).text
