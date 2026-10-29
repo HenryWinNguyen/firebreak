@@ -81,6 +81,7 @@ The admin endpoints need the header `Authorization: Bearer $SHOPFLOOR_ADMIN_TOKE
 | `http_request_duration_seconds` | histogram | `service, route` |
 | `db_pool_in_use` | gauge | `service` |
 | `db_pool_size` | gauge | `service` |
+| `db_queries_total` | counter | `service` (one per DB round trip; added v1.1, T-056) |
 | `app_info` | gauge (=1) | `service, version` |
 | `process_resident_memory_bytes` | gauge | (prometheus_client default) |
 

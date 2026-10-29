@@ -3,26 +3,23 @@
 Reverse-chronological log of milestones. See [SCOPE.md](../SCOPE.md) for the
 milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 
-## ⏸ Waiting on Henry: install Ollama (free local baseline run for CP1)
-
-**Decision (Henry, 2026-10-28):** keep the Claude path working but **don't spend for now**. The paid Claude run
-(T-042) is **optional/deferred**; nothing else is blocked on it. CP1 uses same-model scores from the free local model.
-
-- **Needs from you:** Ollama is installed and `qwen3:8b` is pulled. Restart the server with a 32k context:
-  `OLLAMA_CONTEXT_LENGTH=32768 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 ollama serve`. Tell the lead when done.
-- **Then the lead runs (T-049, $0):** the `FIREBREAK_OLLAMA=1` integration test once, then
-  `python -m firebreak.evals run --mode record --agent baseline-local` on S1–S7, then `make eval` → REPORT.md.
-- **If you decide to pay later:** $5 prepaid Console credits (auto-reload off), key in `.env`, and a go-ahead at
-  run time. It adds a Claude column to the report; nothing is rebuilt.
-- **Optional free upgrade:** a Groq free-tier account would allow a larger hosted open model ($0, ~1,000 req/day).
-- **Not blocked meanwhile:** all other work continues on fakes and replays at $0.
-
 ## Current status
 
-**M2 done. M3 code done. M4 eval harness done (scenarios, grader, record/replay, runner); recordings wait on the local baseline run (T-049; Henry installs Ollama). Paid Claude run optional. T-016 (live S5–S7) in progress.** M1 done. CP0 passed 2026-10-27. Board: `docs/tasks/BOARD.md`.
+**M4 eval harness done. T-049 (local $0 baseline) in progress: first live pass graded S1–S4 (3/4 top-1); fixes T-054/T-055/T-056 before the final re-record. Paid Claude run optional (T-042).** M1–M3 done. CP0 passed 2026-10-27. Board: `docs/tasks/BOARD.md`.
 Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
 ## Log
+
+### 2026-10-29: T-049 first live pass, fixes before the final recording
+- Ollama running (`qwen3:8b`, 32k context). First live record pass, baseline-local, $0:
+  S1 ✅ top-1 (3 steps), S2 ✅ top-1 (5), S3 ❌ (answered resource_exhaustion; expected slow_query), S4 ✅ top-1 (5).
+  S6 errored: `OrdersRssGuardError`, no RSS sample. Orders was stalled on Redis, 2 scrapes timed out (RSS ~755 MiB, fine).
+  The first S4/S6 attempt hit `LLMConnectionRefused` because the Ollama server had stopped; rerun after restart.
+- Findings: (1) the guard fails on any blind poll → **T-054** grace window. (2) the model wrote `level=error` as LogQL
+  in S4 and S6 (Loki 400, no logs): the tool description doesn't name the labels → **T-055**. (3) S3 and S2 look the same
+  in every orders metric → **T-056** `db_queries_total` (CONTRACTS §2.4 v1.1, additive).
+- T-055 changes the tool list, which is part of every LLM step key, so all recordings get re-recorded after these merge.
+  The first-pass recordings are not committed.
 
 ### 2026-10-28: M4 eval harness
 - **T-016** (#61, 1 rework): live validation of S5–S7 (no LLM). S5 HighMemory/orders fires at 216 s (peak 1143 MiB);
