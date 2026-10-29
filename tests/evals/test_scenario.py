@@ -118,3 +118,19 @@ def test_s6_s3_s2_s1_updates() -> None:
     assert sc["S2"].load.rps == 150
     assert sc["S6"].setup.chaos == {"orders.redis_host": "10.255.255.1"}
     assert sc["S1"].setup.chaos == {} and sc["S1"].setup.prior_deploy is not None
+
+
+def test_load_hold_defaults_and_validates() -> None:
+    from pydantic import ValidationError
+
+    from firebreak.evals.scenario import Load
+
+    assert Load(rps=1, duration_s=1).hold == "until_teardown"
+    assert Load(rps=1, duration_s=1, hold="duration").hold == "duration"
+    with pytest.raises(ValidationError):
+        Load(rps=1, duration_s=1, hold="forever")  # type: ignore[arg-type]
+
+
+def test_only_s5_holds_for_a_duration() -> None:
+    scs = load_scenarios(SCENARIO_DIR)
+    assert {k for k, v in scs.items() if v.load.hold == "duration"} == {"S5"}

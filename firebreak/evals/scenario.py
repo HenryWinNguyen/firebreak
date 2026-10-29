@@ -2,7 +2,7 @@
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -76,6 +76,13 @@ class Load(_Strict):
     rps: int = Field(gt=0)
     duration_s: int = Field(gt=0)
     cart_size: int = Field(default=1, ge=1, le=20)
+    hold: Literal["until_teardown", "duration"] = Field(
+        default="until_teardown",
+        description=(
+            "until_teardown: load runs until the scenario is torn down. duration: load stops "
+            "after duration_s (the fault's effect persists without new requests)."
+        ),
+    )
 
 
 class ExpectedAlert(_Strict):

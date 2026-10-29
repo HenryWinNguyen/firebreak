@@ -22,6 +22,7 @@ from firebreak.evals.live import (
     LiveDriveError,
     LiveIncident,
     LoadGenerator,
+    OrdersRssGuardError,
     apply_setup,
     drive_scenario,
     make_admin_client,
@@ -58,6 +59,9 @@ class FakeStack:
         self.fail_paths: set[str] = set()
         self.auth: set[str | None] = set()
         self.gateway_hits = 0
+        self.rss_bytes: float = 100 * 1024 * 1024
+        self.rss_status = 200
+        self.rss_empty = False
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         host, path = request.url.host, request.url.path
@@ -68,6 +72,11 @@ class FakeStack:
             return httpx.Response(500)
         if host == "am":
             return httpx.Response(200, json=self.am_alerts)
+        if host == "prom" and path == "/api/v1/query":
+            if self.rss_status != 200:
+                return httpx.Response(self.rss_status)
+            result = [] if self.rss_empty else [{"value": [0, str(self.rss_bytes)]}]
+            return httpx.Response(200, json={"data": {"result": result}})
         if host == "prom":
             return httpx.Response(200, json={"data": {"alerts": self.prom_alerts}})
         self.auth.add(request.headers.get("authorization"))
@@ -560,3 +569,97 @@ async def test_unhealthy_load_becomes_the_scenario_error() -> None:
         with pytest.raises(LiveDriveError, match="unhealthy"):
             await drive_scenario(S1, record, cfg=CFG, admin=admin, plain=plain, incidents=src)
     assert paths(stack)[-3:] == RESET
+
+
+# ---- T-052: hold, RSS guard ---------------------------------------------------------------
+
+MB = 1024 * 1024
+
+
+def held(sc: Scenario, **load: Any) -> Scenario:
+    data = sc.model_dump(mode="json")
+    data["load"].update(load)
+    return Scenario.model_validate(data)
+
+
+async def never_record(_: str) -> ScenarioOutcome:
+    await asyncio.sleep(30)
+    raise AssertionError("unreachable")
+
+
+async def test_hold_duration_stops_load_after_duration_s() -> None:
+    stack = FakeStack()
+    sc = held(S1, hold="duration", duration_s=1)
+    hits: list[int] = []
+
+    async def record(_: str) -> ScenarioOutcome:
+        await asyncio.sleep(0.5)
+        hits.append(stack.gateway_hits)
+        await asyncio.sleep(1.0)  # crosses the 1s hold
+        hits.append(stack.gateway_hits)
+        await asyncio.sleep(0.3)
+        hits.append(stack.gateway_hits)
+        return outcome("S1")
+
+    src = FakeSource([incident("inc_1", ("HighErrorRate", "orders"))])
+    await drive(stack, sc, src, record)
+    assert hits[1] > hits[0]  # load ran until the hold elapsed
+    assert hits[2] == hits[1]  # and sent nothing after it
+
+
+async def test_hold_until_teardown_keeps_load_running() -> None:
+    stack = FakeStack()
+    assert S1.load.hold == "until_teardown"
+    hits: list[int] = []
+
+    async def record(_: str) -> ScenarioOutcome:
+        await asyncio.sleep(0.1)
+        hits.append(stack.gateway_hits)
+        await asyncio.sleep(0.3)
+        hits.append(stack.gateway_hits)
+        return outcome("S1")
+
+    src = FakeSource([incident("inc_1", ("HighErrorRate", "orders"))])
+    await drive(stack, S1, src, record)
+    assert hits[1] > hits[0]
+
+
+async def test_rss_guard_trips_stops_load_and_tears_down() -> None:
+    stack = FakeStack()
+    stack.rss_bytes = 3000 * MB
+    with pytest.raises(OrdersRssGuardError, match="exceeds the limit"):
+        await drive(stack, S1, FakeSource(), never_record)
+    assert paths(stack)[-3:] == RESET  # torn down
+
+
+async def test_rss_guard_trips_mid_run() -> None:
+    stack = FakeStack()
+
+    async def record(_: str) -> ScenarioOutcome:
+        stack.rss_bytes = 2600 * MB
+        await asyncio.sleep(30)
+        raise AssertionError("guard should have cancelled record")
+
+    src = FakeSource([incident("inc_1", ("HighErrorRate", "orders"))])
+    with pytest.raises(OrdersRssGuardError):
+        await drive(stack, S1, src, record)
+    assert paths(stack)[-3:] == RESET
+
+
+@pytest.mark.parametrize("mode", ["http_error", "no_sample"])
+async def test_rss_guard_fails_closed_when_prometheus_is_unusable(mode: str) -> None:
+    stack = FakeStack()
+    if mode == "http_error":
+        stack.rss_status = 503
+    else:
+        stack.rss_empty = True
+    with pytest.raises(OrdersRssGuardError, match="RSS guard"):
+        await drive(stack, S1, FakeSource(), never_record)
+    assert paths(stack)[-3:] == RESET
+
+
+def test_drive_settings_default_rss_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FIREBREAK_EVAL_DRIVE_MAX_ORDERS_RSS_MB", raising=False)
+    assert DriveSettings(_env_file=None).max_orders_rss_mb == 2500  # type: ignore[call-arg]
+    monkeypatch.setenv("FIREBREAK_EVAL_DRIVE_MAX_ORDERS_RSS_MB", "900")
+    assert DriveSettings(_env_file=None).max_orders_rss_mb == 900  # type: ignore[call-arg]
