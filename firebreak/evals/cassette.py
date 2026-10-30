@@ -2,8 +2,8 @@
 
 A recording makes one agent run on one scenario reproducible offline, for $0:
 
-- ``record_run``: the live run, inside ``deterministic(seed=<scenario>, at=<start>)``. Every
-  LLM response goes to a fixture keyed by the request hash, and every read-adapter result
+- ``record_run``: the live run, inside ``deterministic(seed=<scenario>@<start ISO>, at=<start>)``.
+  Every LLM response goes to a fixture keyed by the request hash, and every read-adapter result
   goes to ``tools.jsonl``.
 - ``replay_run``: the identical run with no LLM client and no adapters behind it. The
   gateway, defanging and evidence path still run for real; only the three read adapters
@@ -730,7 +730,13 @@ def record_run(
 ) -> Iterator[RecordedRun]:
     """Record one run into ``directory`` (see ``recording_dir``).
 
-    The body runs inside ``deterministic(seed=scenario, at=at)``. Files go to a staging
+    The body runs inside ``deterministic(seed, at=at)`` with
+    ``seed = f"{scenario}@{at.isoformat()}"`` (e.g.
+    ``s01@2026-10-29T18:04:05.123456+00:00``), also stored as ``meta.seed``. The seed
+    is unique per recording so a re-record never reuses the ``ev_...`` ids an earlier one left
+    in the eval DB. That uniqueness relies on callers passing a distinct ``at`` per recording
+    (runner.py passes ``utcnow()``); there is deliberately no random component, so the seed
+    is reproducible from meta. Files go to a staging
     directory first; only a body that finishes cleanly *and* passes the secret scan
     replaces ``directory``. On any failure nothing is kept and the error propagates.
     """
@@ -740,10 +746,11 @@ def record_run(
     tag = f"{os.getpid()}.{_secrets.token_hex(4)}"
     staging = directory.with_name(f".{directory.name}.recording.{tag}")
     staging.mkdir(parents=True)
+    seed = f"{scenario}@{at.isoformat()}"
     try:
         cassette = Cassette.record(staging, adapters, scenario=scenario)
         recorder = KeyLoggingRecorder(llm, FixtureStore(staging / LLM_DIR))
-        with deterministic(scenario, at=at):
+        with deterministic(seed, at=at):
             yield RecordedRun(
                 llm=recorder, adapters=cassette.adapters, cassette=cassette, directory=directory
             )
@@ -752,7 +759,7 @@ def record_run(
         meta = RecordingMeta(
             agent=agent,
             scenario=scenario,
-            seed=scenario,
+            seed=seed,
             at=at,
             models=sorted(models),
             prompt_sha256=_prompt_sha256(recorder.requests),
