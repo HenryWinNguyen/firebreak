@@ -218,13 +218,13 @@ async def run_baseline(
     )
 
 
-async def record(directory: Path, live: Live | None = None) -> Outcome:
+async def record(directory: Path, live: Live | None = None, at: datetime = AT) -> Outcome:
     live = live or Live()
     with record_run(
         directory,
         agent="baseline",
         scenario=SCENARIO,
-        at=AT,
+        at=at,
         adapters=live_adapters(live),
         llm=script(),
         secrets=[API_KEY, ADMIN_TOKEN],
@@ -290,7 +290,9 @@ async def test_layout_and_meta(tmp_path: Path) -> None:
     assert not [p for p in (tmp_path / "baseline").iterdir() if p.name.startswith(".")]
 
     meta = json.loads((directory / "meta.json").read_text())
-    assert meta["seed"] == SCENARIO and meta["at"].startswith("2026-10-01T12:00:00")
+    assert meta["seed"] == f"{SCENARIO}@{AT.isoformat()}" and meta["at"].startswith(
+        "2026-10-01T12:00:00"
+    )
     assert meta["models"] == ["claude-sonnet-5-5", "fake"]  # requested + answering
     assert re.fullmatch(r"[0-9a-f]{64}", meta["prompt_sha256"])
     assert [f"llm/{k}.json" for k in meta["llm_steps"]] == sorted(llm, key=meta_order(meta))
@@ -894,3 +896,74 @@ def test_recording_containing_the_openai_key_is_rejected(
     monkeypatch.setenv("FIREBREAK_LLM_OPENAI_API_KEY", key)
     (tmp_path / "tools.jsonl").write_text(json.dumps({"x": key}) + "\n")
     assert find_secrets(tmp_path, default_secrets()) == [tmp_path / "tools.jsonl"]
+
+
+# --- unique seed per recording (T-057) ---------------------------------------------------
+
+
+async def test_rerecord_with_different_at_has_disjoint_evidence_ids(tmp_path: Path) -> None:
+    first = await record(recording_dir("baseline", SCENARIO, root=tmp_path))
+    second = await record(
+        recording_dir("candidate", SCENARIO, root=tmp_path), at=AT + timedelta(seconds=1)
+    )
+    assert first.evidence and second.evidence
+    assert not set(first.evidence) & set(second.evidence)
+    assert first.incident_id != second.incident_id
+
+
+async def test_seed_with_at_and_offset_round_trips_and_replays(tmp_path: Path) -> None:
+    at = datetime(2026, 10, 29, 18, 4, 5, 123456, tzinfo=UTC)
+    directory = recording_dir("baseline", SCENARIO, root=tmp_path)
+    recorded = await record(directory, at=at)
+    seed = json.loads((directory / "meta.json").read_text())["seed"]
+    assert seed == f"{SCENARIO}@2026-10-29T18:04:05.123456+00:00"
+    with replay_run(directory) as rp:
+        assert rp.meta.seed == seed and rp.meta.at == at
+        replayed = await run_baseline(rp.llm, rp.adapters)
+    assert replayed.evidence == recorded.evidence and replayed.calls == recorded.calls
+
+
+@pytest.fixture
+def old_format(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Behave as before T-057: ids seeded by the bare scenario."""
+    import firebreak.evals.cassette as cassette_mod
+
+    real = cassette_mod.deterministic
+
+    def old(seed: str, *, at: datetime) -> Any:
+        return real(seed.split("@")[0], at=at)
+
+    monkeypatch.setattr(cassette_mod, "deterministic", old)
+
+
+def _rewrite_seed_as_scenario(directory: Path) -> None:
+    meta_path = directory / "meta.json"
+    meta = json.loads(meta_path.read_text())
+    meta["seed"] = SCENARIO
+    meta_path.write_text(json.dumps(meta))
+
+
+async def test_old_format_meta_seed_equal_scenario_still_replays(
+    tmp_path: Path, old_format: None
+) -> None:
+    directory = recording_dir("baseline", SCENARIO, root=tmp_path)
+    recorded = await record(directory)
+    _rewrite_seed_as_scenario(directory)
+    with replay_run(directory) as rp:
+        assert rp.meta.seed == SCENARIO
+        replayed = await run_baseline(rp.llm, rp.adapters)
+    assert replayed.evidence == recorded.evidence and replayed.calls == recorded.calls
+
+
+async def test_old_format_recordings_of_one_scenario_share_ids(
+    tmp_path: Path, old_format: None
+) -> None:
+    """Replay seeds ids by meta.seed: old-format agents collide per scenario."""
+    ids = []
+    for agent in ("baseline", "candidate"):
+        directory = recording_dir(agent, SCENARIO, root=tmp_path)
+        await record(directory)
+        _rewrite_seed_as_scenario(directory)
+        with replay_run(directory) as rp:
+            ids.append(set((await run_baseline(rp.llm, rp.adapters)).evidence))
+    assert ids[0] and ids[0] == ids[1]
