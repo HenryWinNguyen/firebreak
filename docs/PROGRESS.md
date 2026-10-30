@@ -10,6 +10,14 @@ Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
 ## Log
 
+### 2026-10-29: T-049 re-record lost to evidence-id collisions → T-057
+- Stack rebuilt from main (it had been running T-016's worktree code, `0c6d7ac`) under the same compose project, so the
+  Postgres volume kept earlier evidence. Grafana not started (host port 3000 in use); evals don't need it.
+- Live check: `db_queries_total` = 6 after 3 orders (T-056 lifespan wiring works). T-054 grace seen working in S6.
+- Re-record S1–S6: recording seeds ids with the scenario id only, so each tool result collided with the first pass's
+  evidence (`EvidenceConflictError`, 18×) and was discarded; S1–S4 ended with no citable findings. S5 (first time
+  recorded) graded, wrong. S6: Ollama down again (`LLMConnectionRefused`). → **T-057**: per-recording seed. Not committed.
+
 ### 2026-10-29: T-049 first live pass, fixes before the final recording
 - Ollama running (`qwen3:8b`, 32k context). First live record pass, baseline-local, $0:
   S1 ✅ top-1 (3 steps), S2 ✅ top-1 (5), S3 ❌ (answered resource_exhaustion; expected slow_query), S4 ✅ top-1 (5).
