@@ -5,10 +5,29 @@ milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 
 ## Current status
 
-**M4 eval harness done. T-049 (local $0 baseline) in progress: first live pass graded S1–S4 (3/4 top-1); fixes T-054/T-055/T-056 before the final re-record. Paid Claude run optional (T-042).** M1–M3 done. CP0 passed 2026-10-27. Board: `docs/tasks/BOARD.md`.
+**M4: harness done; local $0 baseline recorded for S1–S6 (top-1 33%, top-3 50%). S7 waits on T-053. Next: CP1.** M1–M3 done. CP0 passed 2026-10-27. Paid Claude run optional (T-042). Board: `docs/tasks/BOARD.md`.
 Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
 ## Log
+
+### 2026-10-30: T-049 local baseline recorded (S1–S6), $0
+- T-057 (#71): each recording seeds ids with `<scenario>@<at ISO>`, so re-records no longer collide in the eval DB
+  (0 conflicts across all passes). Review minors left open: the disjoint-ids test uses the in-memory sink, and the
+  old-format replay test patches `deterministic` during replay too (no golden old-format recording).
+- Recorded live with `qwen3:8b` (Ollama, 32k ctx), committed under `evals/recordings/baseline-local/`, and replayed
+  offline with identical results. `evals/REPORT.md`:
+
+  | | S1 bad_deploy | S2 resource_exhaustion | S3 slow_query | S4 dependency_failure | S5 memory_leak | S6 misconfiguration |
+  |---|---|---|---|---|---|---|
+  | top-1 / top-3 | ✅ / ✅ | ❌ / ✅ | ❌ / ❌ | ✅ / ✅ | ❌ / ❌ (invalid) | ❌ / ❌ (invalid) |
+
+  **Top-1 33%, top-3 50%, 2 of 6 invalid final answers, required evidence kinds cited in 0 of 6.** S6 cited invented ids
+  (`alert_1`, `deploy_0`), S5 had a hypothesis with no supporting finding, S3 still answers without querying
+  `db_queries_total`. Latency p50 180 s / p95 448 s on a laptop.
+- Operational: Ollama stopped twice mid-run (cause unknown, no crash/jetsam log). After S5, orders kept ~1.5 GiB and
+  `HighMemory` kept firing; the T-052 reset doesn't release it, so the lead restarted orders → **T-058**. S5 was
+  recorded alone with `FIREBREAK_EVAL_DRIVE_MAX_ORDERS_RSS_MB=2000` (the 1500 attempt tripped the guard at 1502 MiB).
+- S7 still waits on T-053 (load generator).
 
 ### 2026-10-29: T-049 re-record lost to evidence-id collisions → T-057
 - Stack rebuilt from main (it had been running T-016's worktree code, `0c6d7ac`) under the same compose project, so the

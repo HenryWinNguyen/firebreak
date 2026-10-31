@@ -1,0 +1,78 @@
+{
+  "format_version": 1,
+  "incident": {
+    "id": "inc_1d13fb79d0804cefa57e4a6e85918129",
+    "state": "grouping",
+    "severity": "warning",
+    "cluster": "shopfloor",
+    "services": [
+      "orders",
+      "gateway"
+    ],
+    "alert_ids": [
+      "al_196256d2b81741b59f0b88ded1102f51",
+      "al_ea79a1d82b764212865da0570ec59ca7",
+      "al_f7aa8535ca2c4ba9acb3ae3193860c60"
+    ],
+    "opened_at": "2026-10-31T03:07:02.746356Z",
+    "window_closes_at": "2026-10-31T03:08:02.746356Z",
+    "updated_at": "2026-10-31T03:08:02.601643Z"
+  },
+  "alerts": [
+    {
+      "id": "al_196256d2b81741b59f0b88ded1102f51",
+      "source": "alertmanager",
+      "fingerprint": "93df82b5e49b5f82",
+      "alertname": "DBPoolSaturated",
+      "service": "orders",
+      "severity": "warning",
+      "status": "firing",
+      "summary": "orders DB pool is 100% in use (> 90%)",
+      "labels": {
+        "env": "demo",
+        "service": "orders",
+        "severity": "warning",
+        "alertname": "DBPoolSaturated"
+      },
+      "started_at": "2026-10-31T03:06:52.383000Z",
+      "ended_at": null
+    },
+    {
+      "id": "al_ea79a1d82b764212865da0570ec59ca7",
+      "source": "alertmanager",
+      "fingerprint": "3672d1dd501fd3c3",
+      "alertname": "HighLatencyP95",
+      "service": "orders",
+      "severity": "warning",
+      "status": "firing",
+      "summary": "orders p95 latency is 4.127s (> 1s)",
+      "labels": {
+        "env": "demo",
+        "service": "orders",
+        "severity": "warning",
+        "alertname": "HighLatencyP95"
+      },
+      "started_at": "2026-10-31T03:07:52.383000Z",
+      "ended_at": null
+    },
+    {
+      "id": "al_f7aa8535ca2c4ba9acb3ae3193860c60",
+      "source": "alertmanager",
+      "fingerprint": "cb714b8eec41cef0",
+      "alertname": "HighLatencyP95",
+      "service": "gateway",
+      "severity": "warning",
+      "status": "firing",
+      "summary": "gateway p95 latency is 4.284s (> 1s)",
+      "labels": {
+        "env": "demo",
+        "service": "gateway",
+        "severity": "warning",
+        "alertname": "HighLatencyP95"
+      },
+      "started_at": "2026-10-31T03:07:52.383000Z",
+      "ended_at": null
+    }
+  ],
+  "latency_s": 208.96521308273077
+}

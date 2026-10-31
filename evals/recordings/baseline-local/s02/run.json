@@ -1,0 +1,39 @@
+{
+  "format_version": 1,
+  "incident": {
+    "id": "inc_f1c75f1b54d646b1b3ba3657fab0ebaa",
+    "state": "grouping",
+    "severity": "warning",
+    "cluster": "shopfloor",
+    "services": [
+      "orders"
+    ],
+    "alert_ids": [
+      "al_edf7ec5ca9224d6787d896b603d8c599"
+    ],
+    "opened_at": "2026-10-31T02:58:02.562358Z",
+    "window_closes_at": "2026-10-31T02:59:02.562358Z",
+    "updated_at": "2026-10-31T02:58:02.562358Z"
+  },
+  "alerts": [
+    {
+      "id": "al_edf7ec5ca9224d6787d896b603d8c599",
+      "source": "alertmanager",
+      "fingerprint": "93df82b5e49b5f82",
+      "alertname": "DBPoolSaturated",
+      "service": "orders",
+      "severity": "warning",
+      "status": "firing",
+      "summary": "orders DB pool is 100% in use (> 90%)",
+      "labels": {
+        "env": "demo",
+        "service": "orders",
+        "severity": "warning",
+        "alertname": "DBPoolSaturated"
+      },
+      "started_at": "2026-10-31T02:57:52.383000Z",
+      "ended_at": null
+    }
+  ],
+  "latency_s": 370.91204633330926
+}
