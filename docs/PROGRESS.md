@@ -10,6 +10,18 @@ Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
 ## Log
 
+### 2026-10-31: T-058, T-059 merged: S5 memory really frees, CI replays recordings
+- **T-058** (#74): S5 leak buffers are anonymous mmaps; `/admin/chaos/reset` closes them. Live check after rebuilding
+  orders: 71 MiB → 371 MiB (300 leaked requests × 1 MiB) → reset → 71 MiB, no restart. A failed close returns 500,
+  which the driver records as a broken teardown (next scenario refuses to start).
+- **T-059** (#73): `make eval AGENT=<dir>|all` (default `baseline-local`); new CI job `replay` (Postgres `firebreak_eval`,
+  no keys, ~40 s) replays every committed recording. Replay exits non-zero only on a stale recording or setup error;
+  graded misses and invalid answers are results. Proven red with a missing LLM fixture. Note: editing a hash in
+  `meta.json` `llm_steps` does not fail replay (hashes are diagnostic; only the step count is checked). The spec's
+  red recipe was wrong. Open minors: the ci.yml comment overstates ("any error"); no job `timeout-minutes`; a stray dir
+  under `evals/recordings/` turns CI red. A regression from a good answer to a worse grade still passes CI.
+- `replay` is not yet a required check in branch protection (needs Henry's OK).
+
 ### 2026-10-30: T-049 local baseline recorded (S1–S6), $0 (recordings span 10-30 16:41 – 10-31 03:57 UTC)
 - T-057 (#71): each recording seeds ids with `<scenario>@<at ISO>`, so re-records no longer collide in the eval DB
   (0 conflicts across all passes). Review minors left open: the disjoint-ids test uses the in-memory sink, and the
