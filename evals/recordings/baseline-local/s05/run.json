@@ -1,0 +1,41 @@
+{
+  "format_version": 1,
+  "incident": {
+    "id": "inc_cab1556b40bc4ed0829fb32aea7129ad",
+    "state": "grouping",
+    "severity": "warning",
+    "cluster": "shopfloor",
+    "services": [
+      "orders"
+    ],
+    "alert_ids": [
+      "al_9d4cc77200ac4575b6d6640d43da5b03"
+    ],
+    "opened_at": "2026-10-31T03:57:32.499225Z",
+    "window_closes_at": "2026-10-31T03:58:32.499225Z",
+    "updated_at": "2026-10-31T03:57:32.499225Z"
+  },
+  "alerts": [
+    {
+      "id": "al_9d4cc77200ac4575b6d6640d43da5b03",
+      "source": "alertmanager",
+      "fingerprint": "af67daef7a51cb64",
+      "alertname": "HighMemory",
+      "service": "orders",
+      "severity": "warning",
+      "status": "firing",
+      "summary": "orders RSS is 1003MiB (> 400MB)",
+      "labels": {
+        "env": "demo",
+        "job": "orders",
+        "service": "orders",
+        "instance": "orders:8101",
+        "severity": "warning",
+        "alertname": "HighMemory"
+      },
+      "started_at": "2026-10-31T03:57:22.383000Z",
+      "ended_at": null
+    }
+  ],
+  "latency_s": 178.68231020821258
+}

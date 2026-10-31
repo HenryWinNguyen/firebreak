@@ -1,0 +1,39 @@
+{
+  "format_version": 1,
+  "incident": {
+    "id": "inc_176b1788ed8940d1858d6ce1bdd6621e",
+    "state": "grouping",
+    "severity": "critical",
+    "cluster": "shopfloor",
+    "services": [
+      "gateway"
+    ],
+    "alert_ids": [
+      "al_44021bde94af4e178e96a2f0255e3f4f"
+    ],
+    "opened_at": "2026-10-31T03:19:17.475162Z",
+    "window_closes_at": "2026-10-31T03:19:17.475162Z",
+    "updated_at": "2026-10-31T03:19:17.475162Z"
+  },
+  "alerts": [
+    {
+      "id": "al_44021bde94af4e178e96a2f0255e3f4f",
+      "source": "alertmanager",
+      "fingerprint": "5433cd32bf202087",
+      "alertname": "HighErrorRate",
+      "service": "gateway",
+      "severity": "critical",
+      "status": "firing",
+      "summary": "gateway 5xx ratio is 85.64% (> 5%)",
+      "labels": {
+        "env": "demo",
+        "service": "gateway",
+        "severity": "critical",
+        "alertname": "HighErrorRate"
+      },
+      "started_at": "2026-10-31T03:19:07.383000Z",
+      "ended_at": null
+    }
+  ],
+  "latency_s": 174.36037404229864
+}

@@ -1,0 +1,17 @@
+{
+  "format_version": 1,
+  "agent": "baseline-local",
+  "scenario": "s05",
+  "seed": "s05@2026-10-31T03:57:35.681071+00:00",
+  "at": "2026-10-31T03:57:35.681071Z",
+  "models": [
+    "qwen3:8b"
+  ],
+  "prompt_sha256": "39cfcc474268b4ee0d037d40332f82066f86109f70f1eb409856831aefc0ab54",
+  "llm_steps": [
+    "03579ad8b8d69d45368a2a71ba419b0b6ed398256af203dad4b20a4824941a1a",
+    "87c4c87cb56d10d3fe6266bea86ec1877df7278ff300415666389bfa5b703701"
+  ],
+  "tool_calls": 0,
+  "recorded_on": "2026-10-31"
+}

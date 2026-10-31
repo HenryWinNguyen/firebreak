@@ -37,8 +37,10 @@
 | T-054 | RSS guard tolerates a short scrape gap (S6) | evals | sonnet | T-052 | merged | #68 |
 | T-055 | logql_query description names the Loki labels | agents | sonnet | T-034 | merged | #66 |
 | T-056 | `db_queries_total` so S3 is distinguishable from S2 | target | sonnet | T-012 | merged | #67 |
-| T-057 | Unique seed per recording (no evidence-id collisions on re-record) | evals | sonnet | T-044 | ready | |
-| T-049 | Local baseline run (`baseline-local`, $0) for CP1: S1–S6 after T-054/55/56/57; S7 after T-053 | evals | lead | T-047, T-016, T-050, T-051, T-054, T-055, T-056, T-057 | in-progress (lead) | |
+| T-057 | Unique seed per recording (no evidence-id collisions on re-record) | evals | sonnet | T-044 | merged | #71 |
+| T-058 | S5 teardown frees orders memory (restart orders if the reset can't) | evals | sonnet | T-052 | pending | |
+| T-059 | CI replays the committed recordings (`make eval AGENT=`, replay job) | evals | sonnet | T-049 | pending | |
+| T-049 | Local baseline run (`baseline-local`, $0) for CP1: S1–S6 recorded; S7 after T-053 | evals | lead | T-047, T-016, T-050, T-051, T-054, T-055, T-056, T-057 | in-progress (lead) | |
 
 ```
 T-011 ─► T-012 ─┐

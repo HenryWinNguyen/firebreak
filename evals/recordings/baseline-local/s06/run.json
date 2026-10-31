@@ -1,0 +1,59 @@
+{
+  "format_version": 1,
+  "incident": {
+    "id": "inc_803ba1e0e0f3464089e76ca219d017f9",
+    "state": "grouping",
+    "severity": "warning",
+    "cluster": "shopfloor",
+    "services": [
+      "gateway",
+      "orders"
+    ],
+    "alert_ids": [
+      "al_51f2aca49cb34e919e0aa911e874593a",
+      "al_2ea3d7b4b11243bca07eb5194d33776b"
+    ],
+    "opened_at": "2026-10-31T03:30:02.498740Z",
+    "window_closes_at": "2026-10-31T03:31:02.498740Z",
+    "updated_at": "2026-10-31T03:30:32.469791Z"
+  },
+  "alerts": [
+    {
+      "id": "al_51f2aca49cb34e919e0aa911e874593a",
+      "source": "alertmanager",
+      "fingerprint": "cb714b8eec41cef0",
+      "alertname": "HighLatencyP95",
+      "service": "gateway",
+      "severity": "warning",
+      "status": "firing",
+      "summary": "gateway p95 latency is 10s (> 1s)",
+      "labels": {
+        "env": "demo",
+        "service": "gateway",
+        "severity": "warning",
+        "alertname": "HighLatencyP95"
+      },
+      "started_at": "2026-10-31T03:29:52.383000Z",
+      "ended_at": null
+    },
+    {
+      "id": "al_2ea3d7b4b11243bca07eb5194d33776b",
+      "source": "alertmanager",
+      "fingerprint": "3672d1dd501fd3c3",
+      "alertname": "HighLatencyP95",
+      "service": "orders",
+      "severity": "warning",
+      "status": "firing",
+      "summary": "orders p95 latency is 10s (> 1s)",
+      "labels": {
+        "env": "demo",
+        "service": "orders",
+        "severity": "warning",
+        "alertname": "HighLatencyP95"
+      },
+      "started_at": "2026-10-31T03:30:22.383000Z",
+      "ended_at": null
+    }
+  ],
+  "latency_s": 179.50752754230052
+}
