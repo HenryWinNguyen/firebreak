@@ -10,7 +10,7 @@ Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
 ## Log
 
-### 2026-10-30: T-049 local baseline recorded (S1–S6), $0
+### 2026-10-30: T-049 local baseline recorded (S1–S6), $0 (recordings span 10-30 16:41 – 10-31 03:57 UTC)
 - T-057 (#71): each recording seeds ids with `<scenario>@<at ISO>`, so re-records no longer collide in the eval DB
   (0 conflicts across all passes). Review minors left open: the disjoint-ids test uses the in-memory sink, and the
   old-format replay test patches `deterministic` during replay too (no golden old-format recording).
