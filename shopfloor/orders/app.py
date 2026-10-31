@@ -6,6 +6,7 @@ import asyncio
 import gc
 import json
 import logging
+import mmap
 import os
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -196,11 +197,28 @@ def create_app(
             "orders.leak_kb_per_request": (0, None),
         },
     )
-    leaked: list[bytes] = []  # S5: freed only by /admin/chaos/reset or a process restart
+    # S5: anonymous mmap regions, one per request, every page touched so it counts toward RSS.
+    # Closing a mapping munmaps it, so the pages go back to the OS deterministically (unlike
+    # bytes objects, which the allocator keeps after free). Freed only by /admin/chaos/reset
+    # (release_leak) or a process restart.
+    leaked: list[mmap.mmap] = []
 
     def release_leak() -> None:
-        """Drop the S5 buffers. The list is emptied for certain; whether RSS falls back is up to
-        the allocator and the OS (large blocks are usually returned, but it is best-effort)."""
+        """Close every S5 mapping (returning its pages to the OS), then empty the list.
+
+        A failed close() is logged with context and re-raised; the list is left intact so the
+        reset can be retried."""
+        for i, region in enumerate(leaked):
+            try:
+                region.close()
+            except Exception:
+                logging.getLogger("shopfloor.orders").exception(
+                    "failed to close leak mapping %d of %d (size=%d)",
+                    i,
+                    len(leaked),
+                    len(region) if not region.closed else 0,
+                )
+                raise
         leaked.clear()
         gc.collect()
 
@@ -296,7 +314,9 @@ def create_app(
         )
         leak_kb = int(runtime.get("orders.leak_kb_per_request"))
         if leak_kb > 0:
-            leaked.append(b"\xa5" * (leak_kb * 1024))  # filled, so it counts toward RSS
+            region = mmap.mmap(-1, leak_kb * 1024)  # anonymous: munmap'd on release_leak
+            region.write(b"\xa5" * len(region))  # touch every page so it counts toward RSS
+            leaked.append(region)
         try:
             if random.random() < float(runtime.get("orders.error_rate")):
                 apply_promotion(req)

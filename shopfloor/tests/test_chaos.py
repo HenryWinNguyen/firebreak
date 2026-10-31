@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import logging
+import mmap
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import httpx
 import pytest
 from common.pool import BoundedPool
@@ -242,9 +249,70 @@ async def test_chaos_reset_releases_the_s5_leak(stack: Stack) -> None:
     for _ in range(3):
         await stack.orders.post("/orders", json=ORDER)
     assert len(leaked) == 3
+    assert all(isinstance(region, mmap.mmap) for region in leaked)
+    regions = list(leaked)
     assert (await stack.orders.post("/admin/chaos/reset", headers=AUTH)).status_code == 200
     assert leaked == []
+    assert all(region.closed for region in regions)
     assert stack.apps["orders"].state.runtime.get("orders.leak_kb_per_request") == 0
+
+
+def _current_rss_bytes() -> int | None:
+    """Current (not peak) RSS of this process, or None where it cannot be measured."""
+    statm = Path("/proc/self/statm")
+    if statm.exists():  # Linux
+        return int(statm.read_text().split()[1]) * mmap.PAGESIZE
+    if sys.platform == "darwin":
+        out = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(os.getpid())], capture_output=True, text=True
+        )
+        if out.returncode == 0 and out.stdout.strip().isdigit():
+            return int(out.stdout.strip()) * 1024
+    return None
+
+
+async def test_reset_returns_leaked_memory_to_the_os(stack: Stack) -> None:
+    before = _current_rss_bytes()
+    if before is None:
+        pytest.skip("current RSS is not measurable here (no /proc/self/statm, not macOS)")
+    stack.inv_store.stock[1] = 10_000
+    leaked = stack.apps["orders"].state.leaked
+    await set_flag(stack.orders, "orders.leak_kb_per_request", 1024)
+    for _ in range(80):
+        await stack.orders.post("/orders", json=ORDER)
+    leaked_bytes = sum(len(r) for r in leaked)
+    assert leaked_bytes >= 64 * 1024 * 1024
+    grown = _current_rss_bytes()
+    assert grown is not None and grown - before >= leaked_bytes // 2  # the leak counts toward RSS
+    assert (await stack.orders.post("/admin/chaos/reset", headers=AUTH)).status_code == 200
+    after = _current_rss_bytes()
+    assert after is not None
+    assert grown - after >= leaked_bytes // 2, (
+        f"RSS fell only {(grown - after) >> 20} MiB of {leaked_bytes >> 20} MiB leaked"
+    )
+    assert leaked == []
+
+
+async def test_failed_close_is_logged_and_reraised(
+    stack: Stack, caplog: pytest.LogCaptureFixture
+) -> None:
+    class Stuck:
+        closed = False
+
+        def __len__(self) -> int:
+            return 4096
+
+        def close(self) -> None:
+            raise BufferError("exported pointers exist")
+
+    leaked = stack.apps["orders"].state.leaked
+    leaked.append(Stuck())  # type: ignore[arg-type]
+    with caplog.at_level(logging.ERROR, logger="shopfloor.orders"):
+        resp = await stack.orders.post("/admin/chaos/reset", headers=AUTH)
+    assert resp.status_code >= 500
+    assert "failed to close leak mapping" in caplog.text
+    assert len(leaked) == 1  # kept, so the reset can be retried
+    leaked.clear()
 
 
 async def test_leak_release_is_admin_only(stack: Stack) -> None:
