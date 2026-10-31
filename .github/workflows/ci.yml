@@ -27,6 +27,30 @@ jobs:
       - run: uv sync --locked
       - run: make check
 
+  replay:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: firebreak
+          POSTGRES_PASSWORD: firebreak
+          POSTGRES_DB: firebreak_eval
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U firebreak" --health-interval 5s --health-retries 10
+    env:
+      # Name ends _eval so require_eval_database_name passes. Replay is offline: no API keys.
+      FIREBREAK_EVAL_DATABASE_URL: postgresql+asyncpg://firebreak:firebreak@localhost:5432/firebreak_eval
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      # Fails on a stale recording or any error; graded misses exit 0.
+      - run: make eval AGENT=all
+
   shopfloor:
     runs-on: ubuntu-latest
     steps:
