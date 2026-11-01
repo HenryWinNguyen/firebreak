@@ -3,12 +3,52 @@
 Reverse-chronological log of milestones. See [SCOPE.md](../SCOPE.md) for the
 milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 
+## ⏸ Waiting on Henry: CP1 (baseline review, go/no-go on M5)
+
+**Baseline** (`baseline-local`, `qwen3:8b` on Ollama, $0, S1–S6; full table in `evals/REPORT.md`):
+top-1 2/6 (S1, S4), top-3 3/6 (+S2), S3 wrong (resource_exhaustion, didn't query `db_queries_total`),
+S5/S6 invalid final answers (empty supporting findings; invented evidence ids), required evidence kinds cited 0/6,
+latency p50 180 s / p95 448 s. Replay is exact and runs in CI.
+
+**What the numbers say:** the single agent stops early (2–7 steps), skips the evidence a scenario needs, and invents
+citations. That's what M5 (supervisor + parallel specialists + synthesizer) and M6 (citation enforcement, critic) target.
+
+**Questions:**
+1. **Go on M5** (Temporal orchestration, per SCOPE M5 / ARCHITECTURE §§3–5)? *Recommended: go.* S7 stays a known
+   gap until T-053.
+2. **T-053 (S7 never fires):** (a) multi-process Python load generator in the driver (no new tool; may still not
+   saturate on this Mac), (b) k6 container (heavier, new dependency), or (c) lower orders capacity for S7 only
+   (e.g. a scenario-scoped worker/CPU cap; deterministic, but changes what "no bug" means). *Recommended: (a) first,
+   time-boxed; fall back to (c).*
+3. **Memory:** M5 adds Temporal + its Postgres to compose (est. ~0.5–1 GB, not measured). With Ollama 8B at 32k ctx the Mac is already
+   tight. OK to stop Loki/Promtail during non-log scenarios if needed, or record with a smaller context?
+
+**Proposed M5 breakdown** (one builder per AGENT_WORKFLOW §2, plus the §8 same-task comparison):
+- T-063 ADR 001: Temporal vs. a plain asyncio state machine for this scale (lead-written, short)
+- T-064 Temporal server + workers in compose; health checks; `make up` still fits in memory
+- T-065 `IncidentWorkflow` skeleton: states GROUPING → … → SYNTHESIZING, activities stubbed, kill-the-worker test (the §8 two-builder comparison)
+- T-066 Supervisor + specialists (metrics, logs, deploys) as activities on the existing runtime/tool gateway
+- T-067 Synthesizer + `multi-local` agent config; record S1–S6, compare to baseline
+
 ## Current status
 
-**M4: harness done; local $0 baseline recorded for S1–S6 (top-1 33%, top-3 50%). S7 waits on T-053. Next: CP1.** M1–M3 done. CP0 passed 2026-10-27. Paid Claude run optional (T-042). Board: `docs/tasks/BOARD.md`.
+**M4: harness done; local $0 baseline recorded for S1–S6 (top-1 33%, top-3 50%). S7 waits on T-053. At CP1 (waiting on Henry, see top).** M1–M3 done. CP0 passed 2026-10-27. Paid Claude run optional (T-042). Board: `docs/tasks/BOARD.md`.
 Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
 ## Log
+
+### 2026-11-01: T-060, T-061, T-062 merged (review minors); `replay` is a required check
+- **T-060** (#78): `make eval AGENT=all` replays only agent dirs that hold recordings (`skip <dir>: no recordings`
+  otherwise); the `replay` job has `timeout-minutes: 15` and a comment that matches the runner (fails on stale
+  recording, bad run info, unknown agent, setup error; graded misses and invalid answers exit 0).
+- **T-061** (#77): `db_queries_total` is counted before each `await`, so failed round trips count; tests for a raising
+  connection and the lifespan wiring. Live after rebuilding orders: 3 orders → 6.
+- **T-062** (#79): the pre-load RSS check refuses to start load when orders is already over the limit; docstrings give
+  the real blind bound (≈ grace + poll + HTTP timeout); the two timing-sensitive guard tests use a fake clock; a golden
+  old-format recording (`tests/evals/fixtures/old_format/`) replays unpatched. Minors left: the "load never started"
+  assertion is indirect (worker-count constant); the golden fixture goes stale on a prompt change like any recording.
+- `replay` added to main's required status checks (with `check`, `shopfloor`, `owned-paths`; strict unchanged).
+- Housekeeping: 34 merged builder worktrees and their local branches removed.
 
 ### 2026-10-31: T-058, T-059 merged: S5 memory really frees, CI replays recordings
 - **T-058** (#74): S5 leak buffers are anonymous mmaps; `/admin/chaos/reset` closes them. Live check after rebuilding
