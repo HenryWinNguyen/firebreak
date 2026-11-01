@@ -6,11 +6,13 @@ import logging
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 
+import firebreak.evals.live as live_mod
 from firebreak.evals.__main__ import main
 from firebreak.evals.cassette import SecretInRecordingError
 from firebreak.evals.live import (
@@ -24,9 +26,11 @@ from firebreak.evals.live import (
     LiveIncident,
     LoadGenerator,
     OrdersRssGuardError,
+    RssUnreadableError,
     apply_setup,
     drive_scenario,
     make_admin_client,
+    rss_guard,
 )
 from firebreak.evals.runner import EvalRunError, RunOutcome, ScenarioOutcome, record_batch
 from firebreak.evals.scenario import Scenario, load_scenarios
@@ -668,20 +672,50 @@ def graced(grace_s: float) -> DriveConfig:
     return dataclasses.replace(CFG, rss_blind_grace_s=grace_s)
 
 
+class _FakeClock:
+    """Drives ``rss_guard`` without wall time: ``sleep`` just advances ``monotonic``."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+GOOD, BLIND, OVER = 100.0, None, 3000.0
+
+
+def script_guard(monkeypatch: pytest.MonkeyPatch, reads: list[float | None]) -> None:
+    """Replace the guard's clock and its RSS reads with a scripted sequence."""
+    clock = _FakeClock()
+    it = iter(reads)
+
+    async def fake_read(client: httpx.AsyncClient, cfg: DriveConfig) -> float:
+        value = next(it)
+        if value is None:
+            raise RssUnreadableError("scripted blind read")
+        return value
+
+    monkeypatch.setattr(live_mod, "orders_rss_mb", fake_read)
+    monkeypatch.setattr(live_mod, "time", SimpleNamespace(monotonic=clock.monotonic))
+    monkeypatch.setattr(live_mod, "asyncio", SimpleNamespace(sleep=clock.sleep))
+
+
+GUARD_CFG = dataclasses.replace(CFG, poll_interval_s=1.0, rss_blind_grace_s=5.0)
+
+
 async def test_rss_blind_gap_shorter_than_grace_is_survived(
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    stack = FakeStack()
-    stack.rss_blind_script = lambda n: 2 <= n <= 6  # read 1 (start check) is good
-    src = FakeSource([incident("inc_1", ("HighErrorRate", "orders"))])
-
-    async def record(_: str) -> ScenarioOutcome:
-        await asyncio.sleep(0.3)
-        return outcome("S1")
-
-    with caplog.at_level("WARNING"):
-        await drive(stack, S1, src, record, cfg=graced(5.0))
-    assert any("RSS guard blind" in r.message for r in caplog.records)
+    # blind for 0..4s (< 5s grace), then a good read, then the limit trips: not a blind failure
+    script_guard(monkeypatch, [BLIND] * 5 + [GOOD, OVER])
+    client = httpx.AsyncClient()
+    with caplog.at_level("WARNING"), pytest.raises(OrdersRssGuardError, match="exceeds the limit"):
+        await rss_guard(client, GUARD_CFG)
+    assert sum("RSS guard blind" in r.message for r in caplog.records) == 5
 
 
 async def test_rss_blind_longer_than_grace_fails_and_tears_down() -> None:
@@ -692,17 +726,38 @@ async def test_rss_blind_longer_than_grace_fails_and_tears_down() -> None:
     assert paths(stack)[-3:] == RESET
 
 
-async def test_rss_good_read_resets_blind_clock() -> None:
+async def test_rss_good_read_resets_blind_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    # three gaps of 4s each (< 5s grace) separated by good reads; 12s blind in total
+    script_guard(monkeypatch, ([BLIND] * 4 + [GOOD]) * 3 + [OVER])
+    with pytest.raises(OrdersRssGuardError, match="exceeds the limit"):
+        await rss_guard(httpx.AsyncClient(), GUARD_CFG)
+
+
+async def test_rss_blind_past_grace_trips_without_good_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script_guard(monkeypatch, [BLIND] * 10)
+    with pytest.raises(OrdersRssGuardError, match="RSS_BLIND_GRACE_S"):
+        await rss_guard(httpx.AsyncClient(), GUARD_CFG)
+
+
+async def test_rss_over_limit_at_start_refuses_to_start_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started: list[float] = []
+    real_start = LoadGenerator.start
+
+    def spy(self: LoadGenerator) -> None:
+        started.append(self._interval_s)
+        real_start(self)
+
+    monkeypatch.setattr(LoadGenerator, "start", spy)
     stack = FakeStack()
-    # blind 4 polls, good, blind 4 polls, good...: each gap < grace, total blind time > grace
-    stack.rss_blind_script = lambda n: n >= 2 and (n - 2) % 5 != 4
-
-    async def record(_: str) -> ScenarioOutcome:
-        await asyncio.sleep(0.6)
-        return outcome("S1")
-
-    src = FakeSource([incident("inc_1", ("HighErrorRate", "orders"))])
-    await drive(stack, S1, src, record, cfg=graced(0.08))
+    stack.rss_bytes = 3000 * MB
+    with pytest.raises(OrdersRssGuardError, match="before load started"):
+        await drive(stack, S1, FakeSource(), never_record)
+    assert 2 / S1.load.rps not in started  # scenario load never started
+    assert paths(stack)[-3:] == RESET
 
 
 async def test_rss_blind_at_start_fails_closed_without_starting_load(

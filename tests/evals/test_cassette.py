@@ -967,3 +967,20 @@ async def test_old_format_recordings_of_one_scenario_share_ids(
         with replay_run(directory) as rp:
             ids.append(set((await run_baseline(rp.llm, rp.adapters)).evidence))
     assert ids[0] and ids[0] == ids[1]
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+async def test_golden_old_format_recording_replays_unpatched() -> None:
+    """A committed recording whose meta.seed is the bare scenario id replays without patching.
+
+    The fixture was produced offline with the test fakes under the ``old_format`` patch (ids
+    seeded by the bare scenario), then ``meta.seed`` set to the scenario id, as before T-057.
+    """
+    directory = recording_dir("baseline", SCENARIO, root=FIXTURES / "old_format")
+    expected = json.loads((FIXTURES / "old_format_evidence_ids.json").read_text())
+    with replay_run(directory) as rp:
+        assert rp.meta.seed == SCENARIO
+        replayed = await run_baseline(rp.llm, rp.adapters)
+    assert sorted(replayed.evidence) == expected

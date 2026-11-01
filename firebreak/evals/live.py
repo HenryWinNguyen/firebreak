@@ -15,11 +15,13 @@ Per scenario (``drive_scenario``):
    An RSS guard polls the orders ``process_resident_memory_bytes`` from Prometheus the whole
    time; above ``FIREBREAK_EVAL_DRIVE_MAX_ORDERS_RSS_MB`` it stops the load and fails the
    scenario (``OrdersRssGuardError``). The metric is read once, synchronously, before the load
-   starts; if that read fails the scenario fails closed (the driver never starts load
-   unguarded). After load has started, a failed read (a scrape gap marks the series stale) is
-   logged as a WARNING and polling continues; the guard fails closed only once it has been
+   starts; if that read fails, or is already over the limit, the scenario fails closed (the
+   driver never starts load unguarded or onto an orders that is already too big). After load
+   has started, a failed read (a scrape gap marks the series stale) is logged as a WARNING and
+   polling continues; the guard fails closed only once it has been
    blind for longer than ``FIREBREAK_EVAL_DRIVE_RSS_BLIND_GRACE_S`` (default 180s). A good read
-   resets the blind clock;
+   resets the blind clock. The real worst-case blind time is a little over the grace: the grace
+   plus one poll interval plus the HTTP timeout of the read in flight;
 4. poll the live DB, read-only, for an incident opened after step 2 that carries any of
    ``expect.alerts``;
 5. hand the incident id to ``record`` (the existing ``record_scenario``);
@@ -457,6 +459,10 @@ async def rss_guard(client: httpx.AsyncClient, cfg: DriveConfig) -> None:
 
     Raises when over the limit (first read) or when blind for longer than
     ``cfg.rss_blind_grace_s``. Every blind poll is logged; a good read resets the blind clock.
+
+    The blind bound is not exactly the grace: the check runs after each failed read, so the guard
+    can be blind for up to about the grace + one poll interval + the HTTP timeout of the read
+    that finally trips it.
     """
     blind_since: float | None = None
     while True:
@@ -712,8 +718,15 @@ async def drive_scenario(
         await apply_setup(admin, scenario, cfg)
         logger.info("scenario %s: applied; waiting for an incident", sid)
         # 3. load, guarded
-        # fail closed right away if the metric is unreadable: never start load unguarded
-        await orders_rss_mb(plain, cfg)
+        # fail closed right away if the metric is unreadable or already over the limit: never
+        # start load unguarded, or onto an orders that would trip the first guard poll
+        start_rss = await orders_rss_mb(plain, cfg)
+        if start_rss > cfg.max_orders_rss_mb:
+            raise OrdersRssGuardError(
+                f"orders RSS {start_rss:.0f} MiB exceeds the limit of "
+                f"{cfg.max_orders_rss_mb:g} MiB (FIREBREAK_EVAL_DRIVE_MAX_ORDERS_RSS_MB) "
+                "before load started; load not started"
+            )
         guard = asyncio.create_task(rss_guard(plain, cfg))
         timer: asyncio.Task[None] | None = None
         gen.start()
