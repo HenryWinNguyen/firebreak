@@ -40,6 +40,9 @@
 | T-057 | Unique seed per recording (no evidence-id collisions on re-record) | evals | sonnet | T-044 | merged | #71 |
 | T-058 | S5 teardown frees orders memory (restart orders if the reset can't) | evals | sonnet | T-052 | merged | #74 |
 | T-059 | CI replays the committed recordings (`make eval AGENT=`, replay job) | evals | sonnet | T-049 | merged | #73 |
+| T-060 | Replay CI job hardening (T-059 minors) | evals | sonnet | T-059 | in-progress | |
+| T-061 | `db_queries_total` counts failed round trips + lifespan test (T-056 minors) | target | sonnet | T-056 | in-progress | |
+| T-062 | RSS start check vs limit + golden old-format recording (T-054/T-057 minors) | evals | sonnet | T-054, T-057 | in-progress | |
 | T-049 | Local baseline run (`baseline-local`, $0) for CP1: S1–S6 recorded; S7 after T-053 | evals | lead | T-047, T-016, T-050, T-051, T-054, T-055, T-056, T-057 | in-progress (lead) | |
 
 ```
