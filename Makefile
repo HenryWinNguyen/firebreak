@@ -44,7 +44,13 @@ RECORDINGS_DIR ?= evals/recordings
 eval:  ## Replay-mode evals over recorded scenarios ($0); AGENT=all replays every agent dir
 	@agents="$(AGENT)"; \
 	if [ "$$agents" = "all" ]; then \
-		agents=$$(ls -d $(RECORDINGS_DIR)/*/ 2>/dev/null | xargs -n1 basename); \
+		agents=""; \
+		for d in $(RECORDINGS_DIR)/*/; do \
+			[ -d "$$d" ] || continue; \
+			n=$$(basename "$$d"); \
+			if ls "$$d"*/meta.json >/dev/null 2>&1; then agents="$$agents $$n"; \
+			else echo "skip $$n: no recordings"; fi; \
+		done; \
 		if [ -z "$$agents" ]; then echo "no recordings under $(RECORDINGS_DIR)" >&2; exit 1; fi; \
 	fi; \
 	for a in $$agents; do \
