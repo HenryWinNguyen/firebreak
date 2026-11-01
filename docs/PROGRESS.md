@@ -20,13 +20,13 @@ citations. That's what M5 (supervisor + parallel specialists + synthesizer) and 
    saturate on this Mac), (b) k6 container (heavier, new dependency), or (c) lower orders capacity for S7 only
    (e.g. a scenario-scoped worker/CPU cap; deterministic, but changes what "no bug" means). *Recommended: (a) first,
    time-boxed; fall back to (c).*
-3. **Memory:** M5 adds Temporal + its Postgres to compose (~0.5–1 GB). With Ollama 8B at 32k ctx the Mac is already
+3. **Memory:** M5 adds Temporal + its Postgres to compose (est. ~0.5–1 GB, not measured). With Ollama 8B at 32k ctx the Mac is already
    tight. OK to stop Loki/Promtail during non-log scenarios if needed, or record with a smaller context?
 
 **Proposed M5 breakdown** (one builder per AGENT_WORKFLOW §2, plus the §8 same-task comparison):
 - T-063 ADR 001: Temporal vs. a plain asyncio state machine for this scale (lead-written, short)
 - T-064 Temporal server + workers in compose; health checks; `make up` still fits in memory
-- T-065 `IncidentWorkflow` skeleton: states GROUPING → … → SYNTHESIZING, activities stubbed, kill-the-worker test
+- T-065 `IncidentWorkflow` skeleton: states GROUPING → … → SYNTHESIZING, activities stubbed, kill-the-worker test (the §8 two-builder comparison)
 - T-066 Supervisor + specialists (metrics, logs, deploys) as activities on the existing runtime/tool gateway
 - T-067 Synthesizer + `multi-local` agent config; record S1–S6, compare to baseline
 
