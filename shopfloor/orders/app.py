@@ -80,13 +80,14 @@ class OrderStore:
             if n_plus_one:
                 # S3: one lookup round trip per item instead of one for the whole cart.
                 for _ in range(quantity):
+                    self._count_query()  # count the attempt, so a raising round trip is counted
                     await conn.fetchval("SELECT 1")
-                    self._count_query()
                     await self._sleep(ITEM_QUERY_SECONDS)
             else:
-                await conn.fetchval("SELECT 1")
                 self._count_query()
+                await conn.fetchval("SELECT 1")
                 await self._sleep(ORDER_WORK_SECONDS)
+            self._count_query()
             order_id = int(
                 await conn.fetchval(
                     "INSERT INTO orders (product_id, quantity) VALUES ($1, $2) RETURNING id",
@@ -94,7 +95,6 @@ class OrderStore:
                     quantity,
                 )
             )
-            self._count_query()
             return order_id
 
 
