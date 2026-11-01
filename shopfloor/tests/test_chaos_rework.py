@@ -133,3 +133,60 @@ async def test_redis_client_has_socket_timeout_and_old_client_closed(
     runtime.set("orders.redis_host", "other")
     await provider.get()
     assert len(created) == 2 and created[0].closed and not created[1].closed
+
+
+class _FailingConn:
+    async def fetchval(self, *args: object) -> int:
+        raise ConnectionError("db down")
+
+
+class _FailingRaw:
+    async def acquire(self) -> _FailingConn:
+        return _FailingConn()
+
+    async def release(self, conn: object) -> None:
+        return None
+
+
+async def test_failed_round_trip_is_counted_and_error_propagates() -> None:
+    metrics = Metrics("orders", "1.0.0")
+    counter = metrics.db_queries.labels("orders")
+    store = OrderStore(BoundedPool(_FailingRaw(), lambda: 5), queries=counter)
+    with pytest.raises(ConnectionError, match="db down"):
+        await store.insert(1, 2)
+    assert counter._value.get() == 1.0
+
+
+class _LifespanConn:
+    async def execute(self, *args: object) -> None:
+        return None
+
+    async def fetchval(self, *args: object) -> int:
+        return 1
+
+
+class _LifespanRaw:
+    async def close(self) -> None:
+        return None
+
+    async def acquire(self) -> _LifespanConn:
+        return _LifespanConn()
+
+    async def release(self, conn: object) -> None:
+        return None
+
+
+async def test_lifespan_wires_store_to_orders_db_queries_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_create_raw_pool(size: int) -> _LifespanRaw:
+        return _LifespanRaw()
+
+    monkeypatch.setattr(orders_app, "create_raw_pool", fake_create_raw_pool)
+    app = orders_app.create_app(store=None, cache=None, inventory=None)
+    async with app.router.lifespan_context(app):
+        store = app.state.store
+        assert isinstance(store, OrderStore)
+        await store.insert(1, 1)
+        text = generate_latest(app.state.metrics.registry).decode()
+    assert 'db_queries_total{service="orders"} 2.0' in text
