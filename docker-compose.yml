@@ -22,8 +22,9 @@ services:
     env_file: .env
     environment:
       FIREBREAK_DATABASE_URL: postgresql+asyncpg://firebreak:firebreak@postgres:5432/firebreak
+      FIREBREAK_TEMPORAL_ADDRESS: temporal:7233
     ports: ["8000:8000"]
-    depends_on:
+    depends_on:  # not on temporal: the API must accept webhooks with Temporal down (T-066)
       postgres: { condition: service_healthy }
 
   # Temporal dev server (CLI image): SQLite on a volume, so history survives restarts (~85 MiB).

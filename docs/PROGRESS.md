@@ -10,6 +10,13 @@ Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
 ## Log
 
+### 2026-11-14 (later): contracts v1.7, specs T-066/T-067
+- Contracts **v1.7** (additive): `IncidentContext.window_closes_at`, `AlertAdded`, `SIGNAL_ALERT_ADDED`; grouping rule in
+  CONTRACTS §1 (ingest signal-with-start; the workflow waits for the window as a timer; Postgres grouper keeps
+  membership, a deliberate simplification of ARCH §3). Compose `api` gets `FIREBREAK_TEMPORAL_ADDRESS`.
+- Specs: **T-066** ingest → workflow (Sonnet), **T-067** `multi-local` eval record/replay through the workflow (Opus,
+  high risk: determinism with parallel specialists).
+
 ### 2026-11-14: M5 core merged: workflow, agent roster, worker live; S7 load generator
 - **T-064** (#86, build B of two): `IncidentWorkflow` (load_context → triage → supervisor plan → parallel specialists →
   synthesizer → `REPORT_ONLY`; noise/duplicate → `DISMISSED`; failures → `ESCALATED` with `error`), `load_context` /

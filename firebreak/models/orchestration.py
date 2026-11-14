@@ -8,7 +8,7 @@ the activities can be built separately. Temporal clients and workers use
 
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 
 from firebreak.models.agents import AgentRunResult
 from firebreak.models.common import Severity
@@ -29,6 +29,17 @@ AGENT_TASK_QUEUE = "firebreak-agents"
 ACTIVITY_LOAD_CONTEXT = "load_context"
 ACTIVITY_RUN_AGENT = "run_agent"
 ACTIVITY_SET_INCIDENT_STATE = "set_incident_state"
+
+#: Signal on ``IncidentWorkflow`` (v1.7): an alert joined the incident. Payload: ``AlertAdded``.
+#: Sent with signal-with-start by ingest, so the first alert also starts the workflow.
+SIGNAL_ALERT_ADDED = "alert_added"
+
+
+class AlertAdded(BaseModel):
+    """Payload of ``SIGNAL_ALERT_ADDED``. A ``critical`` alert closes the grouping window now."""
+
+    alert_id: str
+    severity: Severity
 
 
 class TriageVerdict(StrEnum):
@@ -73,6 +84,10 @@ class IncidentContext(BaseModel):
     incident_id: str
     summary: str
     services: list[str]
+    window_closes_at: AwareDatetime | None = Field(
+        default=None,
+        description="Grouping window end (v1.7); the workflow waits for it. None: no wait",
+    )
     triage: TriageResult | None = None
     plan: Plan | None = None
     reports: list[SpecialistReport] = Field(default_factory=list)
