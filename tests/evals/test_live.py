@@ -833,6 +833,14 @@ def local_gateway() -> Any:
     server.server_close()
 
 
+async def _until(cond: Callable[[], bool], timeout_s: float = 30.0) -> None:
+    """Spawned children can take seconds to start on a slow CI box: poll, don't sleep."""
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while not cond():
+        assert asyncio.get_running_loop().time() < deadline, "children never produced load"
+        await asyncio.sleep(0.1)
+
+
 def test_make_load_generator_one_process_is_the_plain_class() -> None:
     from firebreak.evals.live import MultiProcessLoadGenerator, make_load_generator
 
@@ -855,7 +863,7 @@ async def test_multiprocess_aggregates_children_and_cleans_up(local_gateway: Any
         gen.start()
         procs = list(gen._procs)
         assert len(procs) == 2
-        await asyncio.sleep(2.0)
+        await _until(lambda: gen.ok > 20)
         await gen.stop()
     assert gen.ok > 20
     assert gen.http_errors == gen.transport_errors == gen.crashes == 0
@@ -891,7 +899,7 @@ async def test_multiprocess_child_death_fails_loudly(local_gateway: Any) -> None
         gen = MultiProcessLoadGenerator(c, url, rps=50, processes=2)
         await gen.prepare()
         gen.start()
-        await asyncio.sleep(1.0)
+        await _until(lambda: gen.ok > 0)
         victim = gen._procs[0]
         assert victim.pid is not None
         os.kill(victim.pid, signal.SIGKILL)
@@ -930,7 +938,7 @@ async def test_multiprocess_unreachable_gateway_counts_transport_errors() -> Non
         gen = MultiProcessLoadGenerator(c, "http://127.0.0.1:9", rps=20, processes=2)
         await gen.prepare()  # parent's fake transport; children use real httpx -> refused
         gen.start()
-        await asyncio.sleep(1.5)
+        await _until(lambda: gen.transport_errors > 0)
         await gen.stop()
     assert gen.transport_errors > 0
     assert gen.ok == 0
