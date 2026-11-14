@@ -5,10 +5,49 @@ milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 
 ## Current status
 
-**M5 in progress (Temporal orchestration). CP1 passed 2026-11-14.** M1–M4 done (S7 waits on T-053). CP0 passed 2026-10-27. Paid Claude run optional (T-042). Board: `docs/tasks/BOARD.md`.
+**M5 in progress: workflow, agent roster and worker merged and running in compose; next: ingest → workflow, multi-agent evals. CP1 passed 2026-11-14.** M1–M4 done (S7 waits on T-053). CP0 passed 2026-10-27. Paid Claude run optional (T-042). Board: `docs/tasks/BOARD.md`.
 Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
 ## Log
+
+### 2026-11-14: M5 core merged: workflow, agent roster, worker live; S7 load generator
+- **T-064** (#86, build B of two): `IncidentWorkflow` (load_context → triage → supervisor plan → parallel specialists →
+  synthesizer → `REPORT_ONLY`; noise/duplicate → `DISMISSED`; failures → `ESCALATED` with `error`), `load_context` /
+  `set_incident_state` activities, `IncidentRepository.set_state`, worker (`python -m firebreak.workflows.worker`),
+  `firebreak/workflows/client.py` (`connect`, `start_incident_workflow`, id `incident-<id>`, reject duplicates).
+  Kill-the-worker test restarts both workers on Temporal's dev server; the dead attempt times out and the run finishes.
+  Polish round after selection (sandbox import, client module, worker tests, root-cause error text).
+- **T-064 same-task comparison (AGENT_WORKFLOW §8), 2026-11-14.** Two Sonnet builders implemented the same spec
+  independently (A #84, B #86). Both passed CI and the verify command (A 47 tests, B 50; ~10–12 min each).
+  An independent reviewer compared them; **B kept**, A closed.
+  - A had a real bug that its tests missed: on `ESCALATED` the outcome dropped `degraded_sources` (the updated context
+    never left `_investigate`). Its kill-the-worker test stopped only the activity worker, so the cancelled activity
+    retried in ~1 s: it proved retry, not crash recovery.
+  - B: no blockers; the kill test restarts both workers and lets the dead attempt time out (10 s), so it is the real
+    acceptance. Ported from A: the `connect()` client helper and clean Ctrl-C handling.
+  - Both builders independently hit the same Temporal limit: the time-skipping test server doesn't advance time while a
+    killed attempt is in flight (B) or stalled in CI (A), so both moved the kill test to `start_local` (real dev server).
+  - Takeaway: same spec, similar size (~890 lines), but test strength differed more than code shape. A spec item
+    phrased as an outcome ("degraded sources are listed") needs an explicit assertion in the DoD, or a builder can pass
+    without it. Two builds cost ~2× builder time for one bug caught; worth it once for a high-risk core task, not as a
+    habit.
+- **T-065** (#82, 1 rework): `multi-local` roster on `qwen3:8b` (triage, supervisor, metrics, logs, deploys,
+  synthesizer) and the `run_agent` activity: per-agent blackboard slices (§4.4), synthesizer input capped at 30 findings
+  round-robin with an explicit "N omitted" note, adapters per call (none for tool-less agents), non-retryable
+  `ApplicationError` for bad config and permanent LLM errors, transient errors retried.
+- **T-053** (#83, 1 rework): `Load.processes` (1–8) and a multi-process load generator (spawn children, per-child
+  counters, mid-run child death logged and fails at stop, no orphans). Local floor ~2400 rps with 4 processes vs ~1300
+  with 1. S7 set to 4 × 1200 rps; live validation pending (needs a driven run).
+- Lead: `worker` service in compose (Temporal at `temporal:7233`, tools on the compose network, Ollama via
+  `host.docker.internal`). **Live smoke** (Ollama off): started `incident-inc_cab1556b…` → worker picked it up, triage
+  retried 3× (~4 s), outcome `ESCALATED` with "triage activity failed: …ConnectError…", DB state `escalated`.
+  Follow-up: an Ollama blip escalates in ~4 s; LLM connection errors want a longer backoff.
+- Review minors left open: T-064 worker test doesn't build a real `Worker` (activity name/signature acceptance) and
+  `aclose()` failure handling; T-065 no end-to-end test of the synthesizer `{"error": ...}` path, `affected_services`
+  filter drops all names when `ctx.services` is empty; T-053 watcher task created outside `start()`'s try, Ctrl-C may log
+  one benign "died mid-run", worst-case halt ~15 s.
+- Next for M5: start workflows from ingest when the grouping window closes; `multi-local` eval path (record/replay
+  through the workflow) and S1–S6 recordings vs baseline (needs Ollama); live kill-the-worker acceptance.
 
 ### 2026-11-14: CP1 passed; M5 started
 - **CP1 (Henry, 2026-11-14): go on M5.** Baseline reviewed: `baseline-local` S1–S6 top-1 2/6, top-3 3/6, required
