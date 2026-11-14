@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 from temporalio import activity
+from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import ApplicationError, WorkflowAlreadyStartedError
@@ -331,7 +332,12 @@ async def test_kill_worker_mid_specialist_then_resume(env: WorkflowEnvironment) 
         # first worker is shut down here with the metrics activity still running
         release.set()
         async with agent_worker():
-            out = await asyncio.wait_for(handle.result(), timeout=60)
+            try:
+                out = await asyncio.wait_for(handle.result(), timeout=60)
+            except TimeoutError:
+                history = await handle.fetch_history()
+                events = [f"{e.event_id} {EventType.Name(e.event_type)}" for e in history.events]
+                pytest.fail(f"workflow did not finish; attempts={attempts}; history: {events}")
     assert out.final_state is IncidentState.REPORT_ONLY
     assert out.report is not None
     assert out.degraded_sources == []
