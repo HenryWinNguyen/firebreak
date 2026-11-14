@@ -38,6 +38,7 @@ import logging
 import math
 import multiprocessing
 import os
+import threading
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -456,6 +457,7 @@ MAX_PROCESSES = 8
 CHILD_SYNC_S = 0.1  # how often a child publishes its counters and checks for stop
 CHILD_JOIN_S = 5.0  # halt: wait this long for children to exit on their own, then terminate
 CRASH_MSG_BYTES = 512
+WATCH_S = 1.0  # parent-side poll for children that died mid-run
 
 
 @dataclass(frozen=True)
@@ -562,6 +564,8 @@ class MultiProcessLoadGenerator:
         self._product_ids: list[int] = []
         self._bad: list[str] = []
         self._cleaned = False
+        self._cleanup_lock = threading.Lock()
+        self._watcher: asyncio.Task[None] | None = None
 
     async def prepare(self) -> None:
         helper = LoadGenerator(self._client, self._base, rps=1)
@@ -616,16 +620,45 @@ class MultiProcessLoadGenerator:
                     args=(spec, self._stop_event, counters, msg),
                     daemon=True,
                 )
+                proc.start()  # if this raises, proc was never started: don't track it
                 self._counters.append(counters)
                 self._msgs.append(msg)
                 self._procs.append(proc)
-                proc.start()
         except BaseException:
             self._cleanup()  # never leave half a fleet running
             raise
+        self._watcher = asyncio.get_running_loop().create_task(self._watch())
+
+    async def _watch(self) -> None:
+        """Log, once, each child that dies while load is running. ``stop`` still fails."""
+        reported: set[int | None] = set()
+        while not self._stop_event.is_set():
+            for p in self._procs:
+                if p.pid not in reported and p.exitcode is not None:
+                    if self._stop_event.is_set():
+                        return
+                    reported.add(p.pid)
+                    logger.error(
+                        "load child pid %s died mid-run (exit code %s): %s",
+                        p.pid,
+                        p.exitcode,
+                        self.first_crash,
+                    )
+            await asyncio.sleep(WATCH_S)
+
+    async def _end_watch(self) -> None:
+        watcher, self._watcher = self._watcher, None
+        if watcher is not None:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
 
     def _cleanup(self) -> None:
-        """Blocking: signal stop, wait for children, terminate stragglers (logged)."""
+        """Blocking: signal stop, wait for children, terminate stragglers (logged).
+        Safe to call concurrently and repeatedly: later callers wait, then return."""
+        with self._cleanup_lock:
+            self._cleanup_locked()
+
+    def _cleanup_locked(self) -> None:
         if self._cleaned:
             return
         if not self._stop_event.is_set():  # a child that is gone before we asked is broken
@@ -656,10 +689,12 @@ class MultiProcessLoadGenerator:
 
     async def halt(self) -> None:
         """Stop sending requests now: all children exit within a few seconds."""
+        await self._end_watch()
         await asyncio.to_thread(self._cleanup)
 
     async def stop(self) -> None:
         """Stop all children; raise if one died or the load was unhealthy."""
+        await self._end_watch()
         await asyncio.to_thread(self._cleanup)
         if self._bad:
             raise LiveDriveError(

@@ -2,6 +2,7 @@
 
 import asyncio
 import dataclasses
+import itertools
 import logging
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
@@ -802,13 +803,14 @@ def local_gateway() -> Any:
     import http.server
     import threading
 
+    counter = itertools.count(1)
     hits = {"n": 0}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def _reply(self, body: bytes) -> None:
-            hits["n"] += 1
+            hits["n"] = next(counter)  # itertools.count is atomic under the GIL
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -942,3 +944,70 @@ async def test_multiprocess_unreachable_gateway_counts_transport_errors() -> Non
         await gen.stop()
     assert gen.transport_errors > 0
     assert gen.ok == 0
+
+
+async def test_multiprocess_spawn_failure_keeps_the_real_error(
+    local_gateway: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import multiprocessing.context as mpc
+
+    from firebreak.evals.live import MultiProcessLoadGenerator
+
+    url, _ = local_gateway
+    real_start = mpc.SpawnProcess.start
+    calls = {"n": 0}
+    started: list[Any] = []
+
+    def flaky(self: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("cannot spawn")
+        real_start(self)
+        started.append(self)
+
+    monkeypatch.setattr(mpc.SpawnProcess, "start", flaky)
+    async with httpx.AsyncClient(timeout=5.0) as c:
+        gen = MultiProcessLoadGenerator(c, url, rps=50, processes=3)
+        await gen.prepare()
+        with pytest.raises(OSError, match="cannot spawn"):
+            gen.start()
+    assert len(started) == 1
+    assert all(not p.is_alive() for p in started)
+
+
+async def test_multiprocess_death_is_logged_when_it_happens(
+    local_gateway: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import os
+    import signal
+
+    import firebreak.evals.live as lm
+    from firebreak.evals.live import MultiProcessLoadGenerator
+
+    monkeypatch.setattr(lm, "WATCH_S", 0.05)
+    url, _ = local_gateway
+    async with httpx.AsyncClient(timeout=5.0) as c:
+        gen = MultiProcessLoadGenerator(c, url, rps=50, processes=2)
+        await gen.prepare()
+        gen.start()
+        await _until(lambda: gen.ok > 0)
+        victim = gen._procs[0]
+        assert victim.pid is not None
+        with caplog.at_level(logging.ERROR, logger="firebreak.evals.live"):
+            os.kill(victim.pid, signal.SIGKILL)
+            await _until(lambda: "died mid-run" in caplog.text, 10.0)
+        with pytest.raises(LiveDriveError, match="died"):
+            await gen.stop()
+
+
+async def test_multiprocess_concurrent_halt_and_stop(local_gateway: Any) -> None:
+    from firebreak.evals.live import MultiProcessLoadGenerator
+
+    url, _ = local_gateway
+    async with httpx.AsyncClient(timeout=5.0) as c:
+        gen = MultiProcessLoadGenerator(c, url, rps=50, processes=2)
+        await gen.prepare()
+        gen.start()
+        await _until(lambda: gen.ok > 0)
+        await asyncio.gather(gen.halt(), gen.stop(), gen.halt())
+    assert all(not p.is_alive() for p in gen._procs)
