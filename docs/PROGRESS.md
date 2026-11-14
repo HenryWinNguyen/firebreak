@@ -27,7 +27,7 @@ Repo: https://github.com/HenryWinNguyen/firebreak (public).
     acceptance. Ported from A: the `connect()` client helper and clean Ctrl-C handling.
   - Both builders independently hit the same Temporal limit: the time-skipping test server doesn't advance time while a
     killed attempt is in flight (B) or stalled in CI (A), so both moved the kill test to `start_local` (real dev server).
-  - Takeaway: same spec, similar size (~890 lines), but test strength differed more than code shape. A spec item
+  - Takeaway: same spec, similar size (~890 vs ~1000 lines), but test strength differed more than code shape. A spec item
     phrased as an outcome ("degraded sources are listed") needs an explicit assertion in the DoD, or a builder can pass
     without it. Two builds cost ~2× builder time for one bug caught; worth it once for a high-risk core task, not as a
     habit.
@@ -37,7 +37,7 @@ Repo: https://github.com/HenryWinNguyen/firebreak (public).
   `ApplicationError` for bad config and permanent LLM errors, transient errors retried.
 - **T-053** (#83, 1 rework): `Load.processes` (1–8) and a multi-process load generator (spawn children, per-child
   counters, mid-run child death logged and fails at stop, no orphans). Local floor ~2400 rps with 4 processes vs ~1300
-  with 1. S7 set to 4 × 1200 rps; live validation pending (needs a driven run).
+  with 1. S7 set to 4 processes, 1200 rps total (4 × 300); live validation pending (needs a driven run).
 - Lead: `worker` service in compose (Temporal at `temporal:7233`, tools on the compose network, Ollama via
   `host.docker.internal`). **Live smoke** (Ollama off): started `incident-inc_cab1556b…` → worker picked it up, triage
   retried 3× (~4 s), outcome `ESCALATED` with "triage activity failed: …ConnectError…", DB state `escalated`.
