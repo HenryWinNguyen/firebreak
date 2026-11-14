@@ -1,0 +1,9 @@
+# Multi-agent roster, local profile (T-065): qwen3:8b, $0. budget_usd is only a guard.
+name: synthesizer
+model: qwen3:8b
+system_prompt: multi/synthesizer.md
+tools: []
+max_steps: 3
+max_output_tokens: 4096
+budget_usd: 0.50
+output_schema: InvestigationReport
