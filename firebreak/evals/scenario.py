@@ -76,6 +76,15 @@ class Load(_Strict):
     rps: int = Field(gt=0)
     duration_s: int = Field(gt=0)
     cart_size: int = Field(default=1, ge=1, le=20)
+    processes: int = Field(
+        default=1,
+        ge=1,
+        le=8,
+        description=(
+            "Load generator processes. 1 = one asyncio process. N > 1 = N child processes, "
+            "each at rps / N (one process tops out at a few hundred rps on a laptop)."
+        ),
+    )
     hold: Literal["until_teardown", "duration"] = Field(
         default="until_teardown",
         description=(
