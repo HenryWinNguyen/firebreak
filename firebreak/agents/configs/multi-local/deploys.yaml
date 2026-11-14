@@ -1,0 +1,11 @@
+# Multi-agent roster, local profile (T-065): qwen3:8b, $0. budget_usd is only a guard.
+name: deploys
+model: qwen3:8b
+system_prompt: multi/deploys.md
+tools:
+  - recent_deploys
+  - service_graph
+max_steps: 8
+max_output_tokens: 3072
+budget_usd: 0.50
+output_schema: SpecialistReport
