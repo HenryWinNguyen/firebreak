@@ -50,7 +50,7 @@ docs and code comments can cite them (e.g. "see ARCH §6.3").
 | `api` | FastAPI: webhooks, REST, SSE, approval endpoints | Stateless, N replicas |
 | `orchestrator-worker` | Temporal worker that runs workflow code | N replicas, Temporal shards the work |
 | `agent-worker` | Temporal worker that runs activities (LLM and tool calls) | N replicas, separate task queue so the slow LLM calls don't starve workflow tasks |
-| `temporal` | Temporal server (+ its Postgres) | 1 in dev |
+| `temporal` | Temporal server. Dev: the CLI dev server with SQLite on a volume (M5, saves a Postgres); prod: server + its Postgres | 1 in dev |
 | `postgres` | App DB + pgvector | 1 |
 | `dashboard` | Next.js | Vercel |
 | `shopfloor-*` | Target services | Compose |

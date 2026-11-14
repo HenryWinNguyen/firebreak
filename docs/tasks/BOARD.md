@@ -33,7 +33,7 @@
 | T-050 | Context-overflow guard for local models | agents | sonnet | T-047 | merged | #56 |
 | T-051 | Live record driver + per-scenario errors | evals | sonnet | T-045, T-047, T-050 | merged | #59 |
 | T-052 | Make S5 (memory leak) safe for driven runs | evals | sonnet | T-051 | merged | #63 |
-| T-053 | S7 load capacity (multi-process load generator or k6) | target | sonnet | T-016 | pending | |
+| T-053 | S7 load capacity: multi-process load generator (time-boxed; CP1 choice a) | evals | sonnet | T-016, T-062 | in-progress | |
 | T-054 | RSS guard tolerates a short scrape gap (S6) | evals | sonnet | T-052 | merged | #68 |
 | T-055 | logql_query description names the Loki labels | agents | sonnet | T-034 | merged | #66 |
 | T-056 | `db_queries_total` so S3 is distinguishable from S2 | target | sonnet | T-012 | merged | #67 |
@@ -43,6 +43,8 @@
 | T-060 | Replay CI job hardening (T-059 minors) | evals | sonnet | T-059 | merged | #78 |
 | T-061 | `db_queries_total` counts failed round trips + lifespan test (T-056 minors) | target | sonnet | T-056 | merged | #77 |
 | T-062 | RSS start check vs limit + golden old-format recording (T-054/T-057 minors) | evals | sonnet | T-054, T-057 | merged | #79 |
+| T-064 | `IncidentWorkflow` skeleton + worker (M5; §8 two-builder comparison) | core | sonnet | contracts v1.6 | in-progress | |
+| T-065 | Multi-agent roster (local profile) + `run_agent` activity (M5) | agents | sonnet | contracts v1.6 | in-progress | |
 | T-049 | Local baseline run (`baseline-local`, $0) for CP1: S1–S6 recorded; S7 after T-053 | evals | lead | T-047, T-016, T-050, T-051, T-054, T-055, T-056, T-057 | in-progress (lead) | |
 
 ```
