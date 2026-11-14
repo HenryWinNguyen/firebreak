@@ -1,6 +1,9 @@
 """T-065: the roster configs and the ``run_agent`` activity (fake LLM, fake tools, no network)."""
 
 import json
+import logging
+import shutil
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -10,8 +13,16 @@ from temporalio.exceptions import ApplicationError
 from firebreak.activities.agents import AgentActivities, build_agent_task_text
 from firebreak.agents.config import CONFIGS_DIR, load_agent_configs, resolve_output_schema
 from firebreak.agents.settings import AgentSettings
+from firebreak.llm.errors import (
+    FixtureMissing,
+    LLMConnectionRefused,
+    LLMError,
+    LLMRetriesExhausted,
+    PricingError,
+    UnknownModelError,
+)
 from firebreak.models.common import Severity
-from firebreak.models.evidence import Finding, SpecialistReport
+from firebreak.models.evidence import Evidence, EvidenceKind, Finding, SpecialistReport
 from firebreak.models.llm import LLMRequest
 from firebreak.models.orchestration import (
     AgentTask,
@@ -21,6 +32,7 @@ from firebreak.models.orchestration import (
     TriageResult,
     TriageVerdict,
 )
+from firebreak.models.reasoning import InvestigationReport
 from firebreak.tools.settings import ToolSettings
 from tests.agents.test_baseline import fake_read_registry
 from tests.tools.fakes import (
@@ -270,12 +282,250 @@ async def test_unknown_profile_is_non_retryable() -> None:
     assert e.value.non_retryable
 
 
-async def test_adapters_are_closed_after_each_call() -> None:
+# --- adapter lifecycle -------------------------------------------------------------------
+
+
+class RaisingLLM:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+    async def complete(self, request: LLMRequest) -> Any:
+        raise self.exc
+
+
+def _adapters() -> Any:
     from firebreak.tools.read_tools import ReadAdapters
 
-    adapters = AsyncMock(spec=ReadAdapters)
-    llm = ScriptedLLM([text_response("x"), text_response("y")])
+    return AsyncMock(spec=ReadAdapters)
+
+
+async def test_adapters_are_closed_after_each_call() -> None:
+    adapters = _adapters()
+    llm = ScriptedLLM([tool_response(("t1", "promql_query", {"query": "up"})), _specialist_final])
     acts = _activities(llm)
     acts.registry_factory = lambda: (fake_read_registry(), adapters)
-    await acts.run_agent(AgentTask(agent="triage", incident_id="inc_1", context=_ctx()))
+    task = AgentTask(agent="metrics", incident_id="inc_1", question="q", context=_ctx())
+    await acts.run_agent(task)
     adapters.aclose.assert_awaited_once()
+
+
+async def test_adapters_are_closed_when_the_run_raises() -> None:
+    adapters = _adapters()
+    acts = _activities(ScriptedLLM([]))
+    acts.llm = RaisingLLM(ConnectionError("boom"))  # type: ignore[assignment]
+    acts.registry_factory = lambda: (fake_read_registry(), adapters)
+    task = AgentTask(agent="metrics", incident_id="inc_1", question="q", context=_ctx())
+    with pytest.raises(ConnectionError):
+        await acts.run_agent(task)
+    adapters.aclose.assert_awaited_once()
+
+
+async def test_adapters_are_closed_when_building_the_registry_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from firebreak.activities import agents as mod
+
+    adapters = _adapters()
+
+    def broken_registry(*_: Any) -> Any:
+        raise RuntimeError("registry failed")
+
+    monkeypatch.setattr(mod.ServiceGraph, "load", lambda: None)
+    monkeypatch.setattr(mod, "build_default_adapters", lambda _s: adapters)
+    monkeypatch.setattr(mod, "build_read_registry", broken_registry)
+    acts = _activities(ScriptedLLM([]))
+    acts.registry_factory = None
+    task = AgentTask(agent="metrics", incident_id="inc_1", question="q", context=_ctx())
+    with pytest.raises(RuntimeError, match="registry failed"):
+        await acts.run_agent(task)
+    adapters.aclose.assert_awaited_once()
+
+
+@pytest.mark.parametrize("agent", ["triage", "synthesizer"])
+async def test_tool_less_agents_build_no_adapters(
+    agent: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from firebreak.activities import agents as mod
+
+    def forbidden(*_: Any) -> Any:
+        raise AssertionError("adapters must not be built for a tool-less agent")
+
+    monkeypatch.setattr(mod.ServiceGraph, "load", forbidden)
+    monkeypatch.setattr(mod, "build_default_adapters", forbidden)
+    llm = ScriptedLLM([text_response("not json"), text_response("still not json")])
+    acts = _activities(llm)
+    acts.registry_factory = None
+    task = AgentTask(agent=agent, incident_id="inc_1", context=_ctx())
+    result = await acts.run_agent(task)
+    assert result.stopped_reason == "error"
+
+
+# --- error classification ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        PricingError("no price for x"),
+        UnknownModelError("unknown model x"),
+        FixtureMissing("abc", "/tmp/x"),
+        LLMError("bad request", status_code=400),
+    ],
+)
+async def test_non_retryable_llm_errors_become_non_retryable_application_errors(
+    exc: LLMError,
+) -> None:
+    acts = _activities(ScriptedLLM([]))
+    acts.llm = RaisingLLM(exc)  # type: ignore[assignment]
+    task = AgentTask(agent="triage", incident_id="inc_1", context=_ctx())
+    with pytest.raises(ApplicationError) as e:
+        await acts.run_agent(task)
+    assert e.value.non_retryable
+    assert str(exc) in str(e.value)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        LLMConnectionRefused("nothing listening"),
+        LLMRetriesExhausted("gave up", retryable=True),
+        LLMError("rate limited", status_code=429, retryable=True),
+        ConnectionError("db down"),
+    ],
+)
+async def test_transient_errors_propagate_unchanged(exc: Exception) -> None:
+    acts = _activities(ScriptedLLM([]))
+    acts.llm = RaisingLLM(exc)  # type: ignore[assignment]
+    task = AgentTask(agent="triage", incident_id="inc_1", context=_ctx())
+    with pytest.raises(type(exc)) as e:
+        await acts.run_agent(task)
+    assert e.value is exc
+
+
+async def test_bad_agent_config_is_non_retryable(tmp_path: Path) -> None:
+    profile = tmp_path / "multi-local"
+    shutil.copytree(PROFILE, profile)
+    (profile / "triage.yaml").write_text(
+        (PROFILE / "triage.yaml").read_text().replace("TriageResult", "NoSuchSchema")
+    )
+    acts = _activities(ScriptedLLM([]))
+    acts.configs_dir = tmp_path
+    task = AgentTask(agent="triage", incident_id="inc_1", context=_ctx())
+    with pytest.raises(ApplicationError) as e:
+        await acts.run_agent(task)
+    assert e.value.non_retryable and e.value.type == "BadAgentConfig"
+
+
+# --- slices: bounds and filtering --------------------------------------------------------
+
+
+def _many_reports(n_per_report: int) -> list[SpecialistReport]:
+    return [
+        SpecialistReport(
+            agent=agent,
+            question="q",
+            findings=[
+                Finding(
+                    claim=f"{agent} claim {i} " + "x" * 800,
+                    evidence_ids=[f"ev_{agent}_{i}"],
+                    confidence=0.5,
+                    agent=agent,
+                )
+                for i in range(n_per_report)
+            ],
+        )
+        for agent in ("metrics", "logs", "deploys")
+    ]
+
+
+def test_synthesizer_input_is_bounded_per_finding_and_says_what_was_omitted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ctx = _ctx(reports=_many_reports(14))  # 42 findings, 30 kept
+    task = AgentTask(agent="synthesizer", incident_id="inc_1", context=ctx)
+    with caplog.at_level(logging.WARNING, logger="firebreak.activities.agents"):
+        text = build_agent_task_text(task)
+    assert "12 findings omitted" in text
+    assert any("findings_omitted=12" in r.getMessage() for r in caplog.records)
+    start = text.index("[{")
+    end = text.index("</untrusted-data", start)
+    reports = json.loads(text[start:end].strip())  # still valid JSON
+    kept = [f for r in reports for f in r["findings"]]
+    assert len(kept) == 30
+    assert {len(r["findings"]) for r in reports} == {10}  # round-robin, none crowded out
+    assert all(len(f["claim"]) <= 500 for f in kept)
+
+
+def test_synthesizer_input_has_no_omitted_note_when_nothing_is_dropped() -> None:
+    ctx = _ctx(reports=_many_reports(2))
+    text = build_agent_task_text(AgentTask(agent="synthesizer", incident_id="inc_1", context=ctx))
+    assert "omitted" not in text
+
+
+def test_unknown_triage_services_are_dropped_for_specialists(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    triage = _triage().model_copy(update={"affected_services": ["orders", "ghost-svc"]})
+    task = AgentTask(agent="logs", incident_id="inc_1", question="q", context=_ctx(triage=triage))
+    with caplog.at_level(logging.WARNING, logger="firebreak.activities.agents"):
+        text = build_agent_task_text(task)
+    assert "Affected services: orders\n" in text and "ghost-svc" not in text.split("Your")[0]
+    assert any("ghost-svc" in r.getMessage() for r in caplog.records)
+
+
+def test_all_unknown_triage_services_fall_back_to_incident_services() -> None:
+    triage = _triage().model_copy(update={"affected_services": ["ghost-svc"]})
+    task = AgentTask(agent="logs", incident_id="inc_1", question="q", context=_ctx(triage=triage))
+    assert "Affected services: gateway, orders, inventory" in build_agent_task_text(task)
+
+
+# --- synthesizer run ---------------------------------------------------------------------
+
+
+async def test_synthesizer_run_returns_a_valid_report_with_refs_and_existing_evidence() -> None:
+    sink = FakeEvidenceSink()
+    for ev_id in ("ev_m1", "ev_d1"):
+        ev = Evidence(
+            id=ev_id,
+            incident_id="inc_1",
+            tool_call_id="t",
+            kind=EvidenceKind.METRIC_SERIES,
+            query="q",
+            summary="s",
+            raw_ref="r",
+        )
+        sink.stored[ev_id] = (ev, "raw")
+    report = {
+        "findings": [
+            {
+                "claim": "latency up",
+                "evidence_ids": ["ev_m1"],
+                "confidence": 0.8,
+                "agent": "metrics",
+            },
+            {"claim": "deploy", "evidence_ids": ["ev_d1"], "confidence": 0.7, "agent": "deploys"},
+        ],
+        "hypotheses": [
+            {
+                "root_cause_category": "bad_deploy",
+                "explanation": "latency began after the deploy",
+                "supporting_findings": ["f0", "f1"],
+                "confidence": 0.6,
+                "rank": 1,
+            }
+        ],
+    }
+    llm = ScriptedLLM([text_response(json.dumps(report))])
+    ctx = _ctx(
+        triage=_triage(),
+        reports=[_report("metrics", "ev_m1"), _report("deploys", "ev_d1")],
+        degraded_sources=["logs"],
+    )
+    task = AgentTask(agent="synthesizer", incident_id="inc_1", context=ctx)
+    result = await _activities(llm, sink).run_agent(task)
+    assert result.stopped_reason == "final_output"
+    out = InvestigationReport.model_validate(result.output)
+    assert [f.evidence_ids for f in out.findings] == [["ev_m1"], ["ev_d1"]]
+    assert out.hypotheses[0].supporting_findings == ["f0", "f1"]
+    assert llm.requests[0].tools == []
+    assert "Degraded sources (failed or timed out): logs" in str(llm.requests[0].messages[0])
