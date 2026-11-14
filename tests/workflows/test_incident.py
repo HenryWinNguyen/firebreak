@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import timedelta
 from typing import Any
 
@@ -39,11 +39,8 @@ from firebreak.models.reasoning import (
     InvestigationReport,
     RootCauseCategory,
 )
-from firebreak.workflows.incident import (
-    IncidentWorkflow,
-    start_incident_workflow,
-    workflow_id,
-)
+from firebreak.workflows.client import start_incident_workflow
+from firebreak.workflows.incident import IncidentWorkflow, workflow_id
 
 INCIDENT = "inc_test1"
 
@@ -309,6 +306,7 @@ async def test_synthesizer_activity_failure_escalates() -> None:
     out, _ = await run_incident({**HAPPY, "synthesizer": _raises})
     assert out.final_state == IncidentState.ESCALATED
     assert out.error is not None and "synthesizer" in out.error
+    assert "ApplicationError: boom" in out.error  # root cause, not the ActivityError wrapper
     assert len(out.agent_runs) == 4
 
 
@@ -363,16 +361,16 @@ async def test_worker_killed_mid_specialist_resumes() -> None:
     stub = Hanging(HAPPY)
     async with env_client(time_skipping=False) as (_, client):
         wf1, act1 = make_workers(client, stub, graceful_shutdown_timeout=timedelta(0))
-        await wf1.__aenter__()
-        await act1.__aenter__()
-        handle = await start_incident_workflow(client, INCIDENT)
-        await asyncio.wait_for(in_flight.wait(), timeout=30)
-        await act1.__aexit__(None, None, None)
-        await wf1.__aexit__(None, None, None)
+        async with AsyncExitStack() as first_process:
+            await first_process.enter_async_context(wf1)
+            await first_process.enter_async_context(act1)
+            handle = await start_incident_workflow(client, INCIDENT)
+            await asyncio.wait_for(in_flight.wait(), timeout=30)
+        # leaving the stack stops both workers: the first "process" is dead
 
         wf2, act2 = make_workers(client, stub)
         async with wf2, act2:
-            # the dead attempt only fails by timing out; jump past its 30 s start_to_close
+            # the dead attempt only fails once its 10 s start_to_close elapses (real time)
             out = await asyncio.wait_for(handle.result(), timeout=60)
     assert attempts["n"] >= 2
     assert out.final_state == IncidentState.REPORT_ONLY

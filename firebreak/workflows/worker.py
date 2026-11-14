@@ -6,6 +6,7 @@ both workers gracefully (in-flight activities get ``worker_shutdown_grace_s``).
 """
 
 import asyncio
+import contextlib
 import importlib
 import logging
 import signal
@@ -14,14 +15,14 @@ from datetime import timedelta
 from typing import Any
 
 from temporalio.client import Client
-from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.worker import Worker
 
 from firebreak.activities.incident import IncidentActivities
 from firebreak.db.engine import make_engine, make_session_factory
 from firebreak.models.orchestration import AGENT_TASK_QUEUE, ORCHESTRATOR_TASK_QUEUE
+from firebreak.workflows.client import connect
 from firebreak.workflows.incident import IncidentWorkflow
-from firebreak.workflows.settings import WorkflowSettings
+from firebreak.workflows.settings import TemporalSettings
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,19 @@ def load_agent_activities() -> Any | None:
     return builder()
 
 
+def collect_activities(
+    incident_activities: IncidentActivities, agent_activities: Any | None
+) -> list[Callable[..., Any]]:
+    """Every activity this process serves on ``AGENT_TASK_QUEUE``."""
+    activities: list[Callable[..., Any]] = [
+        incident_activities.load_context,
+        incident_activities.set_incident_state,
+    ]
+    if agent_activities is not None:
+        activities.append(agent_activities.run_agent)
+    return activities
+
+
 async def run_worker(
     client: Client,
     incident_activities: IncidentActivities,
@@ -50,12 +64,7 @@ async def run_worker(
     grace: timedelta,
 ) -> None:
     """Run both workers until ``stop`` is set, then shut them down gracefully."""
-    activities: list[Callable[..., Any]] = [
-        incident_activities.load_context,
-        incident_activities.set_incident_state,
-    ]
-    if agent_activities is not None:
-        activities.append(agent_activities.run_agent)
+    activities = collect_activities(incident_activities, agent_activities)
     workflow_worker = Worker(
         client, task_queue=ORCHESTRATOR_TASK_QUEUE, workflows=[IncidentWorkflow]
     )
@@ -72,7 +81,7 @@ async def run_worker(
 
 
 async def main() -> None:
-    settings = WorkflowSettings()
+    settings = TemporalSettings()
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -81,11 +90,7 @@ async def main() -> None:
     engine = make_engine()
     agent_activities = load_agent_activities()
     try:
-        client = await Client.connect(
-            settings.temporal_address,
-            namespace=settings.temporal_namespace,
-            data_converter=pydantic_data_converter,
-        )
+        client = await connect(settings)
         await run_worker(
             client,
             IncidentActivities(make_session_factory(engine)),
@@ -103,4 +108,5 @@ async def main() -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(main())

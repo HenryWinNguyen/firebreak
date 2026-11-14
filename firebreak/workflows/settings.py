@@ -3,7 +3,7 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class WorkflowSettings(BaseSettings):
+class TemporalSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="FIREBREAK_", env_file=".env", extra="ignore")
 
     temporal_address: str = "localhost:7233"

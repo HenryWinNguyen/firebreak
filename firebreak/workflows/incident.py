@@ -14,13 +14,13 @@ corrupting old ones (orphaned evidence from the dead attempt is harmless).
 import asyncio
 from datetime import timedelta
 
-from pydantic import BaseModel, ValidationError
 from temporalio import workflow
-from temporalio.client import Client, WorkflowHandle
-from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
+from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 
 with workflow.unsafe.imports_passed_through():
+    from pydantic import BaseModel, ValidationError
+
     from firebreak.models.agents import AgentRunResult
     from firebreak.models.evidence import SpecialistReport
     from firebreak.models.incident import IncidentState
@@ -30,7 +30,6 @@ with workflow.unsafe.imports_passed_through():
         ACTIVITY_RUN_AGENT,
         ACTIVITY_SET_INCIDENT_STATE,
         AGENT_TASK_QUEUE,
-        ORCHESTRATOR_TASK_QUEUE,
         AgentTask,
         IncidentContext,
         Plan,
@@ -61,9 +60,12 @@ class _Invalid(Exception):
     """An agent step produced no usable output; the message becomes ``WorkflowOutcome.error``."""
 
 
-def _describe(e: BaseException) -> str:
-    cause = e.__cause__
-    return f"{type(e).__name__}: {cause if cause is not None else e}"
+def _describe(e: ActivityError) -> str:
+    """Root cause of a failed activity (the ``ActivityError`` wrapper only says it failed)."""
+    root: BaseException = e
+    while root.__cause__ is not None:
+        root = root.__cause__
+    return f"{type(root).__name__}: {root}"
 
 
 @workflow.defn(name="IncidentWorkflow")
@@ -235,21 +237,3 @@ class IncidentWorkflow:
                 continue
             reports.append(report)
         return reports, list(dict.fromkeys(degraded))
-
-
-async def start_incident_workflow(
-    client: Client, incident_id: str
-) -> WorkflowHandle[IncidentWorkflow, WorkflowOutcome]:
-    """Start ``IncidentWorkflow`` with id ``incident-<incident_id>``.
-
-    ``REJECT_DUPLICATE`` refuses a second start for the same incident whether the first is
-    running or already closed (Temporal raises ``WorkflowAlreadyStartedError``): one incident
-    gets exactly one investigation. A re-investigation needs an explicit new design.
-    """
-    return await client.start_workflow(
-        IncidentWorkflow.run,
-        incident_id,
-        id=workflow_id(incident_id),
-        task_queue=ORCHESTRATOR_TASK_QUEUE,
-        id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
-    )
