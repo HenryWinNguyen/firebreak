@@ -10,7 +10,8 @@ setup:
 # rps 500 is the highest the generator can pace without collapsing (100 workers = httpx pool).
 # The expected alert is kept as the capacity-fault signal; firing it needs a heavier generator
 # (multi-process / k6) or a lower orders capacity, see the T-016 PR notes.
-load: {rps: 500, duration_s: 300, cart_size: 1}
+# T-053: 4 processes x 300 rps each. rps and processes are a starting guess: tune live, the lead validates.
+load: {rps: 1200, processes: 4, duration_s: 300, cart_size: 1}
 expect:
   alerts:  # any-of
     - {alertname: HighLatencyP95, service: orders}

@@ -1,9 +1,11 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from firebreak.evals.scenario import (
     TOOL_REACHABLE_KINDS,
+    Load,
     ScenarioError,
     load_scenario,
     load_scenarios,
@@ -134,3 +136,17 @@ def test_load_hold_defaults_and_validates() -> None:
 def test_only_s5_holds_for_a_duration() -> None:
     scs = load_scenarios(SCENARIO_DIR)
     assert {k for k, v in scs.items() if v.load.hold == "duration"} == {"S5"}
+
+
+def test_load_processes_default_and_bounds() -> None:
+    assert Load(rps=1, duration_s=1).processes == 1
+    assert Load(rps=1, duration_s=1, processes=8).processes == 8
+    for bad in (0, 9):
+        with pytest.raises(ValidationError):
+            Load(rps=1, duration_s=1, processes=bad)
+
+
+def test_s07_uses_four_processes() -> None:
+    sc = load_scenarios(SCENARIO_DIR)
+    assert sc["S7"].load.processes == 4
+    assert sc["S7"].load.rps == 1200

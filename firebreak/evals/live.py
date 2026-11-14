@@ -36,10 +36,13 @@ The admin token is read from ``ToolSettings`` and only ever placed in the admin 
 import asyncio
 import logging
 import math
+import multiprocessing
+import os
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from multiprocessing.synchronize import Event as MpEvent
 from typing import Any, Protocol
 
 import httpx
@@ -322,6 +325,18 @@ async def apply_setup(admin: httpx.AsyncClient, scenario: Scenario, cfg: DriveCo
 # --- load ---------------------------------------------------------------------------------
 
 
+def _check_crashes(crashes: int, other_attempts: int, first_crash: str | None) -> None:
+    """Raise if worker crashes make the load generator unhealthy; warn if tolerated."""
+    attempts = other_attempts + crashes
+    if crashes and (crashes >= CRASH_LIMIT or crashes > 0.1 * attempts):
+        raise LiveDriveError(
+            f"load generator unhealthy: {crashes} worker crash(es) in {attempts} "
+            f"requests (first: {first_crash})"
+        )
+    if crashes:
+        logger.warning("load generator: %d worker crash(es), tolerated", crashes)
+
+
 class LoadGenerator:
     """Async load against the gateway: ``rps`` requests per second in total, 1 in 5 of them
     ``GET /api/products`` and the rest ``POST /api/orders`` with ``quantity=cart_size``.
@@ -407,33 +422,286 @@ class LoadGenerator:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
 
-    async def stop(self) -> None:
-        """Cancel workers; raise if the load was unhealthy or a worker died."""
-        dead = [
+    def dead_workers(self) -> list[BaseException]:
+        """Exceptions of worker tasks that died on their own (never cancelled by us)."""
+        return [
             exc
             for t in self._tasks
             if t.done() and not t.cancelled() and (exc := t.exception()) is not None
         ]
+
+    async def stop(self) -> None:
+        """Cancel workers; raise if the load was unhealthy or a worker died."""
+        dead = self.dead_workers()
         for t in self._tasks:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks = []
-        attempts = self.ok + self.http_errors + self.transport_errors + self.crashes
         if dead:
             raise LiveDriveError(f"{len(dead)} load worker(s) died: {dead[0]!r}") from dead[0]
-        if self.crashes and (self.crashes >= CRASH_LIMIT or self.crashes > 0.1 * attempts):
-            raise LiveDriveError(
-                f"load generator unhealthy: {self.crashes} worker crash(es) in {attempts} "
-                f"requests (first: {self.first_crash})"
-            )
-        if self.crashes:
-            logger.warning("load generator: %d worker crash(es), tolerated", self.crashes)
+        _check_crashes(
+            self.crashes, self.ok + self.http_errors + self.transport_errors, self.first_crash
+        )
 
     def summary(self) -> str:
         return (
             f"ok={self.ok} http_errors={self.http_errors} transport_errors={self.transport_errors} "
             f"crashes={self.crashes}"
         )
+
+
+# --- multi-process load (T-053) ------------------------------------------------------------
+
+MAX_PROCESSES = 8
+CHILD_SYNC_S = 0.1  # how often a child publishes its counters and checks for stop
+CHILD_JOIN_S = 5.0  # halt: wait this long for children to exit on their own, then terminate
+CRASH_MSG_BYTES = 512
+
+
+@dataclass(frozen=True)
+class _ChildSpec:
+    base_url: str
+    headers: dict[str, str]
+    timeout: tuple[float | None, float | None, float | None, float | None]  # conn/read/write/pool
+    product_ids: list[int]
+    rps: float
+    cart_size: int
+    max_concurrency: int
+
+
+def _put_msg(msg: Any, text: str) -> None:
+    msg.value = text.encode("utf-8", "replace")[:CRASH_MSG_BYTES]
+
+
+async def _child_async(spec: _ChildSpec, stop: MpEvent, counters: Any, msg: Any) -> int:
+    connect, read, write, pool = spec.timeout
+    timeout = httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
+    parent = os.getppid()
+    async with httpx.AsyncClient(headers=spec.headers, timeout=timeout) as client:
+        gen = LoadGenerator(
+            client,
+            spec.base_url,
+            rps=spec.rps,
+            cart_size=spec.cart_size,
+            max_concurrency=spec.max_concurrency,
+        )
+        gen._product_ids = list(spec.product_ids)  # prepare() happened once, in the parent
+
+        def publish() -> None:
+            counters[:] = [gen.ok, gen.http_errors, gen.transport_errors, gen.crashes]
+            if gen.first_crash is not None and not msg.value:
+                _put_msg(msg, gen.first_crash)
+
+        gen.start()
+        code = 0
+        try:
+            while not stop.is_set():
+                publish()
+                if gen.dead_workers():
+                    code = 2  # a worker task died: broken generator, fail loudly
+                    break
+                if os.getppid() != parent:
+                    code = 3  # orphaned (parent was killed): stop sending load
+                    break
+                await asyncio.sleep(CHILD_SYNC_S)
+        finally:
+            dead = gen.dead_workers()
+            await gen.halt()
+            publish()
+        if dead:
+            _put_msg(msg, f"worker died: {dead[0]!r}")
+            code = 2
+        return code
+
+
+def _child_main(spec: _ChildSpec, stop: MpEvent, counters: Any, msg: Any) -> None:
+    """Entry point of a load child process (module level: it must be picklable for spawn)."""
+    try:
+        code = asyncio.run(_child_async(spec, stop, counters, msg))
+    except KeyboardInterrupt:
+        code = 0  # Ctrl-C reaches the whole process group; the parent does the reporting
+    except Exception as exc:
+        _put_msg(msg, f"child failed: {type(exc).__name__}: {exc}")
+        raise
+    raise SystemExit(code)
+
+
+class MultiProcessLoadGenerator:
+    """``LoadGenerator`` spread over ``processes`` child processes (spawn context).
+
+    Each child runs the ordinary asyncio generator at ``rps / processes`` with its own httpx
+    client (parent's base URL, timeout and headers). ``prepare`` runs once, in the parent. The
+    children publish their counters through shared memory; the counters here are the sums. A
+    child that exits before ``halt`` is a broken generator: ``stop`` raises.
+    Children are daemons and also exit on their own if the parent disappears.
+    """
+
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        gateway_url: str,
+        *,
+        rps: float,
+        processes: int,
+        cart_size: int = 1,
+        max_concurrency: int = 50,
+    ) -> None:
+        if not 1 <= processes <= MAX_PROCESSES:
+            raise ValueError(f"processes must be 1..{MAX_PROCESSES}, got {processes}")
+        self._client = client
+        self._base = gateway_url.rstrip("/")
+        self._n = processes
+        self._rps = rps
+        self._cart_size = cart_size
+        self._max_concurrency = max_concurrency
+        self._ctx = multiprocessing.get_context("spawn")
+        self._stop_event: MpEvent = self._ctx.Event()
+        self._procs: list[Any] = []
+        self._counters: list[Any] = []
+        self._msgs: list[Any] = []
+        self._product_ids: list[int] = []
+        self._bad: list[str] = []
+        self._cleaned = False
+
+    async def prepare(self) -> None:
+        helper = LoadGenerator(self._client, self._base, rps=1)
+        await helper.prepare()
+        self._product_ids = helper._product_ids
+
+    def _total(self, idx: int) -> int:
+        return sum(int(c[idx]) for c in self._counters)
+
+    @property
+    def ok(self) -> int:
+        return self._total(0)
+
+    @property
+    def http_errors(self) -> int:
+        return self._total(1)
+
+    @property
+    def transport_errors(self) -> int:
+        return self._total(2)
+
+    @property
+    def crashes(self) -> int:
+        return self._total(3)
+
+    @property
+    def first_crash(self) -> str | None:
+        for m in self._msgs:
+            if m.value:
+                return str(m.value.decode("utf-8", "replace"))
+        return None
+
+    def start(self) -> None:
+        if not self._product_ids:
+            raise LiveDriveError("LoadGenerator.start() before prepare()")
+        t = self._client.timeout
+        spec = _ChildSpec(
+            base_url=self._base,
+            headers=dict(self._client.headers),
+            timeout=(t.connect, t.read, t.write, t.pool),
+            product_ids=self._product_ids,
+            rps=self._rps / self._n,
+            cart_size=self._cart_size,
+            max_concurrency=self._max_concurrency,
+        )
+        try:
+            for _ in range(self._n):
+                counters = self._ctx.Array("q", 4, lock=False)
+                msg = self._ctx.Array("c", CRASH_MSG_BYTES, lock=False)
+                proc = self._ctx.Process(
+                    target=_child_main,
+                    args=(spec, self._stop_event, counters, msg),
+                    daemon=True,
+                )
+                self._counters.append(counters)
+                self._msgs.append(msg)
+                self._procs.append(proc)
+                proc.start()
+        except BaseException:
+            self._cleanup()  # never leave half a fleet running
+            raise
+
+    def _cleanup(self) -> None:
+        """Blocking: signal stop, wait for children, terminate stragglers (logged)."""
+        if self._cleaned:
+            return
+        if not self._stop_event.is_set():  # a child that is gone before we asked is broken
+            self._bad = [
+                f"pid {p.pid} exited early (code {p.exitcode})"
+                for p in self._procs
+                if p.exitcode is not None
+            ]
+        self._stop_event.set()
+        deadline = time.monotonic() + CHILD_JOIN_S
+        for p in self._procs:
+            p.join(max(0.0, deadline - time.monotonic()))
+        for p in self._procs:
+            if p.is_alive():
+                logger.error(
+                    "load child pid %s did not stop in %gs, terminating", p.pid, CHILD_JOIN_S
+                )
+                p.terminate()
+                p.join(CHILD_JOIN_S)
+                if p.is_alive():
+                    p.kill()
+                    p.join(CHILD_JOIN_S)
+        if not self._bad:
+            self._bad = [
+                f"pid {p.pid} exit code {p.exitcode}" for p in self._procs if p.exitcode != 0
+            ]
+        self._cleaned = True
+
+    async def halt(self) -> None:
+        """Stop sending requests now: all children exit within a few seconds."""
+        await asyncio.to_thread(self._cleanup)
+
+    async def stop(self) -> None:
+        """Stop all children; raise if one died or the load was unhealthy."""
+        await asyncio.to_thread(self._cleanup)
+        if self._bad:
+            raise LiveDriveError(
+                f"{len(self._bad)} of {self._n} load process(es) died: {self._bad[0]} "
+                f"(first error: {self.first_crash})"
+            )
+        _check_crashes(
+            self.crashes, self.ok + self.http_errors + self.transport_errors, self.first_crash
+        )
+
+    def summary(self) -> str:
+        return (
+            f"ok={self.ok} http_errors={self.http_errors} transport_errors={self.transport_errors} "
+            f"crashes={self.crashes} processes={self._n}"
+        )
+
+
+LoadDriver = LoadGenerator | MultiProcessLoadGenerator
+
+
+def make_load_generator(
+    client: httpx.AsyncClient,
+    gateway_url: str,
+    *,
+    rps: float,
+    processes: int = 1,
+    cart_size: int = 1,
+    max_concurrency: int = 50,
+) -> LoadDriver:
+    """``processes == 1`` is exactly the single-process ``LoadGenerator``."""
+    if processes == 1:
+        return LoadGenerator(
+            client, gateway_url, rps=rps, cart_size=cart_size, max_concurrency=max_concurrency
+        )
+    return MultiProcessLoadGenerator(
+        client,
+        gateway_url,
+        rps=rps,
+        processes=processes,
+        cart_size=cart_size,
+        max_concurrency=max_concurrency,
+    )
 
 
 # --- guards -------------------------------------------------------------------------------
@@ -496,7 +764,7 @@ async def rss_guard(client: httpx.AsyncClient, cfg: DriveConfig) -> None:
         await asyncio.sleep(cfg.poll_interval_s)
 
 
-async def _stop_load_after(gen: LoadGenerator, seconds: float, sid: str) -> None:
+async def _stop_load_after(gen: LoadDriver, seconds: float, sid: str) -> None:
     await asyncio.sleep(seconds)
     await gen.halt()
     logger.info("scenario %s: load held for %gs, stopped (hold: duration)", sid, seconds)
@@ -505,7 +773,7 @@ async def _stop_load_after(gen: LoadGenerator, seconds: float, sid: str) -> None
 async def _guarded(
     work: Awaitable[Any],
     guard: "asyncio.Task[None]",
-    gen: LoadGenerator,
+    gen: LoadDriver,
 ) -> Any:
     """Await ``work`` inline; if the guard raises first, cancel it, halt the load and raise the
     guard's error. (Inline, not a child task, so a ``KeyboardInterrupt`` still propagates.)"""
@@ -598,7 +866,7 @@ async def _teardown(
     cfg: DriveConfig,
     admin: httpx.AsyncClient,
     plain: httpx.AsyncClient,
-    gen: LoadGenerator | None,
+    gen: LoadDriver | None,
     state: DriveState,
 ) -> str | None:
     """Undo the scenario. Returns a load-health problem (the scenario's error) or None.
@@ -701,10 +969,11 @@ async def drive_scenario(
         )
     state.uncleared.clear()
 
-    gen = LoadGenerator(
+    gen = make_load_generator(
         plain,
         cfg.gateway_url,
         rps=scenario.load.rps,
+        processes=scenario.load.processes,
         cart_size=scenario.load.cart_size,
         max_concurrency=cfg.max_concurrency,
     )
