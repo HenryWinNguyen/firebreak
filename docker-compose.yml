@@ -38,6 +38,25 @@ services:
       interval: 5s
       retries: 20
 
+  # Temporal worker (T-064): workflow + agent activities in one process (ARCH §1 splits them later).
+  worker:
+    build: .
+    command: ["uv", "run", "--no-dev", "python", "-m", "firebreak.workflows.worker"]
+    env_file: .env
+    environment:
+      FIREBREAK_DATABASE_URL: postgresql+asyncpg://firebreak:firebreak@postgres:5432/firebreak
+      FIREBREAK_TEMPORAL_ADDRESS: temporal:7233
+      FIREBREAK_TOOLS_PROMETHEUS_URL: http://prometheus:9090
+      FIREBREAK_TOOLS_LOKI_URL: http://loki:3100
+      FIREBREAK_TOOLS_SHOPFLOOR_URLS: '{"gateway": "http://gateway:8100", "orders": "http://orders:8101", "inventory": "http://inventory:8102"}'
+      # Ollama runs on the host, not in compose.
+      FIREBREAK_LLM_OPENAI_BASE_URL: http://host.docker.internal:11434/v1
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    stop_grace_period: 45s  # > worker_shutdown_grace_s (30) so shutdown can finish
+    depends_on:
+      postgres: { condition: service_healthy }
+      temporal: { condition: service_healthy }
+
 volumes:
   pgdata:
   temporaldata:
