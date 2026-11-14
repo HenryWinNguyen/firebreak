@@ -41,6 +41,8 @@ class IncidentActivities:
             incident_id=incident.id,
             summary=build_task(incident, alerts),
             services=list(incident.services),
+            # AwareDatetime: a naive value fails validation loudly (workflow fails visibly).
+            window_closes_at=incident.window_closes_at,
         )
 
     @activity.defn(name=ACTIVITY_SET_INCIDENT_STATE)
