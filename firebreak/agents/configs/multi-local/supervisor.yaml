@@ -1,0 +1,10 @@
+# Multi-agent roster, local profile (T-065): qwen3:8b, $0. budget_usd is only a guard.
+name: supervisor
+model: qwen3:8b
+system_prompt: multi/supervisor.md
+tools:
+  - service_graph
+max_steps: 6
+max_output_tokens: 3072
+budget_usd: 0.50
+output_schema: Plan
