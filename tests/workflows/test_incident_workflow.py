@@ -299,8 +299,21 @@ async def test_duplicate_start_is_refused(env: WorkflowEnvironment) -> None:
             await start_incident_workflow(client, "inc_dup")
 
 
-async def test_kill_worker_mid_specialist_then_resume(env: WorkflowEnvironment) -> None:
-    """M5 acceptance: stop the worker with a specialist in flight; a new worker finishes it."""
+@pytest.fixture
+async def local_env() -> AsyncIterator[WorkflowEnvironment]:
+    async with await WorkflowEnvironment.start_local(data_converter=pydantic_data_converter) as e:
+        yield e
+
+
+async def test_kill_worker_mid_specialist_then_resume(local_env: WorkflowEnvironment) -> None:
+    """M5 acceptance: stop the worker with a specialist in flight; a new worker finishes it.
+
+    Runs on the real-time dev server rather than the time-skipping one: the time-skipping
+    server stalled a workflow task intermittently in CI after a worker shutdown. No timeout
+    has to elapse here (the cancelled activity fails fast and is retried), so wall time is
+    short either way.
+    """
+    env = local_env
     in_flight = asyncio.Event()
     release = asyncio.Event()
     attempts = {"metrics": 0}
