@@ -5,10 +5,31 @@ milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 
 ## Current status
 
-**M5 in progress: workflow, agent roster and worker merged and running in compose; next: ingest → workflow, multi-agent evals. CP1 passed 2026-11-14.** M1–M4 done (S7 waits on T-053). CP0 passed 2026-10-27. Paid Claude run optional (T-042). Board: `docs/tasks/BOARD.md`.
+**M5 in progress: alert → workflow → multi-agent report runs end to end on the live stack (local model); next: T-068 hardening, T-067 multi-agent evals, then record `multi-local`. CP1 passed 2026-11-14.** M1–M4 done (S7 waits on T-053). CP0 passed 2026-10-27. Paid Claude run optional (T-042). Board: `docs/tasks/BOARD.md`.
 Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
 ## Log
+
+### 2026-11-14 (evening): T-066 merged, first live end-to-end run, contracts v1.8
+- **T-066 merged (#89):** ingest signal-with-starts `incident-<id>`; the workflow waits in `GROUPING` for the window
+  (or a critical alert) and reloads the context before triage. Review blockers fixed in rework: stale context after
+  the wait, `None`-window semantics, and a concurrent connect that could block past its time bound.
+- **First live end-to-end run** (compose stack, qwen3:8b on one Ollama, $0): a warning webhook created
+  `inc_11276771…`, the workflow waited 60 s, then triage, supervisor, metrics, deploys and synthesizer all ran, and it
+  finished `REPORT_ONLY` in ~11 min. The alert was synthetic (orders was healthy), so the report's "unknown, 0.5"
+  is honest, and its one finding cites a real evidence id. Flaws found: the supervisor planned the *tool*
+  `service_graph` as an agent (it degraded harmlessly), and serial Ollama makes 300 s timeouts too short.
+- **#91 (lead):** 8 failed workflows on the live Temporal came from host test runs (start identity `<pid>@<host>`),
+  bisected to `tests/integration` posting webhooks through the real signaller. A root autouse fixture now points
+  every test at a dead Temporal address; the full suite adds 0 live workflows (was 4).
+- **Contracts v1.8 (#92, additive):** `SPECIALIST_AGENTS`, `WorkflowOutcome.dropped_tasks`; `SpecialistTask.timeout_s`
+  default 300→1800, max 900→3600. Spec **T-068** (Sonnet): drop unknown agents, local-model timeouts, LLM-down
+  backoff, supervisor prompt fix. The supervisor prompt is in the request hash, so `multi-local` is recorded after it.
+- **T-067 (#90) in rework:** the Opus review confirmed replay is deterministic (a shared-stream probe makes the
+  skewed-completion test fail, so it is not blind), but reproduced one blocker: any timeout or retry during record
+  discarded the whole recording. The fix records retried calls fresh and stores terminal failures so replay degrades
+  the same way.
+- Ollama now runs as a background process the lead starts (log in the session scratchpad), not in a terminal tab.
 
 ### 2026-11-14 (later): contracts v1.7, specs T-066/T-067
 - Contracts **v1.7** (additive): `IncidentContext.window_closes_at`, `AlertAdded`, `SIGNAL_ALERT_ADDED`; grouping rule in
