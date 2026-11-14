@@ -49,7 +49,9 @@ class TriageResult(BaseModel):
 class SpecialistTask(BaseModel):
     agent: str = Field(description="Specialist agent config name, e.g. 'metrics'")
     question: str
-    timeout_s: int = Field(default=90, ge=10, le=600, description="start_to_close for this task")
+    timeout_s: int = Field(
+        default=300, ge=10, le=900, description="start_to_close for this task (local models are slow)"
+    )
 
 
 class Plan(BaseModel):
