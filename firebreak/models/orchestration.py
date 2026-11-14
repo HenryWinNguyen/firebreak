@@ -34,6 +34,10 @@ ACTIVITY_SET_INCIDENT_STATE = "set_incident_state"
 #: Sent with signal-with-start by ingest, so the first alert also starts the workflow.
 SIGNAL_ALERT_ADDED = "alert_added"
 
+#: Specialists a ``Plan`` may name (v1.8). The workflow drops tasks naming anything else (a local
+#: model once planned the tool ``service_graph`` as an agent) and lists them in the outcome.
+SPECIALIST_AGENTS = frozenset({"metrics", "logs", "deploys"})
+
 
 class AlertAdded(BaseModel):
     """Payload of ``SIGNAL_ALERT_ADDED``. A ``critical`` alert closes the grouping window now."""
@@ -61,10 +65,13 @@ class SpecialistTask(BaseModel):
     agent: str = Field(description="Specialist agent config name, e.g. 'metrics'")
     question: str
     timeout_s: int = Field(
-        default=300,
+        default=1800,
         ge=10,
-        le=900,
-        description="start_to_close for this task (local models are slow)",
+        le=3600,
+        description=(
+            "start_to_close for this task (v1.8: local models are slow and a single Ollama "
+            "serves parallel specialists one request at a time)"
+        ),
     )
 
 
@@ -124,6 +131,9 @@ class WorkflowOutcome(BaseModel):
     final_state: IncidentState
     report: InvestigationReport | None = None
     degraded_sources: list[str] = Field(default_factory=list)
+    dropped_tasks: list[str] = Field(
+        default_factory=list, description="Plan tasks naming no known specialist (v1.8)"
+    )
     agent_runs: list[AgentRunResult] = Field(default_factory=list)
     usage: Usage = Field(default_factory=Usage)
     error: str | None = None
