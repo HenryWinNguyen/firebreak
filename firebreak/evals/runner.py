@@ -1,4 +1,9 @@
-"""Eval runner (ARCH §9): replay (or record) the baseline over scenarios, grade, store.
+"""Eval runner (ARCH §9): replay (or record) an eval agent over scenarios, grade, store.
+
+Two kinds of eval agent: a single config (``baseline``, ``baseline-local``: one yaml under
+``firebreak/agents/configs/``, run by ``investigate``) and a profile directory (``multi-local``:
+the multi-agent roster, run through the real ``IncidentWorkflow``; ``multi.py`` has the record
+and replay design). Both are graded on the final ``InvestigationReport``.
 
 Replay is fully offline. It uses the T-044 cassette adapters and replay LLM client inside
 ``deterministic(...)`` (all done by ``replay_run``), hands the adapters to ``investigate`` through
@@ -33,10 +38,14 @@ from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
+from temporalio.client import WorkflowFailureError
 
 import firebreak.db
+from firebreak.activities.agents import AgentActivities
+from firebreak.activities.incident import IncidentActivities
 from firebreak.agents.baseline import BaselineResult, investigate
 from firebreak.agents.config import CONFIGS_DIR
+from firebreak.agents.settings import AgentSettings
 from firebreak.config import Settings
 from firebreak.db.repositories import (
     AlertRepository,
@@ -58,6 +67,14 @@ from firebreak.evals.cassette import (
     replay_run,
 )
 from firebreak.evals.grader import grade
+from firebreak.evals.multi import (
+    MultiRecordError,
+    MultiRun,
+    UnsetLLM,
+    record_multi,
+    replay_multi,
+    run_incident_workflow,
+)
 from firebreak.evals.scenario import Scenario
 from firebreak.llm.errors import LLMError
 from firebreak.llm.pricing import PricingTable
@@ -68,6 +85,8 @@ from firebreak.models.common import new_id, utcnow
 from firebreak.models.evidence import EvidenceKind
 from firebreak.models.incident import Incident
 from firebreak.models.llm import LLMClient
+from firebreak.models.orchestration import WorkflowOutcome
+from firebreak.models.reasoning import InvestigationReport
 from firebreak.tools.read_tools import ReadAdapters, build_read_registry
 from firebreak.tools.settings import ToolSettings
 
@@ -265,19 +284,23 @@ def load_run_info(directory: Path, scenario: str) -> RecordedRunInfo:
     return info
 
 
-def _to_result(
+def _graded(
     scenario: Scenario,
-    result: BaselineResult,
+    report: InvestigationReport | None,
+    *,
+    error: str | None,
+    cost_usd: float,
+    steps: int,
     evidence_kinds: Mapping[str, EvidenceKind],
     latency_s: float,
 ) -> EvalResult:
     g = grade(
         scenario,
-        result.report,
+        report,
         evidence_kinds=evidence_kinds,
-        usage_usd=result.usage.cost_usd,
+        usage_usd=cost_usd,
         latency_s=latency_s,
-        error=result.error,
+        error=error,
     )
     return EvalResult(
         scenario_id=scenario.id,
@@ -287,9 +310,50 @@ def _to_result(
         report_valid=g.report_valid,
         cost_usd=g.cost_usd,
         latency_s=g.latency_s,
-        steps=result.steps,
+        steps=steps,
         error=g.error,
-        report=None if result.report is None else result.report.model_dump(mode="json"),
+        report=None if report is None else report.model_dump(mode="json"),
+    )
+
+
+def _to_result(
+    scenario: Scenario,
+    result: BaselineResult,
+    evidence_kinds: Mapping[str, EvidenceKind],
+    latency_s: float,
+) -> EvalResult:
+    return _graded(
+        scenario,
+        result.report,
+        error=result.error,
+        cost_usd=result.usage.cost_usd,
+        steps=result.steps,
+        evidence_kinds=evidence_kinds,
+        latency_s=latency_s,
+    )
+
+
+def _outcome_result(
+    scenario: Scenario,
+    outcome: WorkflowOutcome,
+    evidence_kinds: Mapping[str, EvidenceKind],
+    latency_s: float,
+) -> EvalResult:
+    """Grade a workflow run. ``ESCALATED``/``DISMISSED`` are graded results, not crashes.
+
+    Cost is the workflow's usage (summed across agent runs); steps are summed the same way.
+    """
+    error = outcome.error
+    if outcome.report is None and error is None:
+        error = f"workflow ended {outcome.final_state.value} without a report"
+    return _graded(
+        scenario,
+        outcome.report,
+        error=error,
+        cost_usd=outcome.usage.cost_usd,
+        steps=sum(r.steps for r in outcome.agent_runs),
+        evidence_kinds=evidence_kinds,
+        latency_s=latency_s,
     )
 
 
@@ -324,6 +388,10 @@ async def replay_scenario(
 
     Raises ``StaleRecordingError`` (naming the scenario) if the recording no longer matches.
     """
+    if is_profile(agent):
+        return await replay_multi_scenario(
+            scenario, agent=agent, root=root, sessions=sessions, tools_settings=tools_settings
+        )
     await require_eval_session(sessions)
     key = scenario_key(scenario.id)
     directory = recording_dir(agent, key, root)
@@ -351,23 +419,44 @@ async def replay_scenario(
     )
 
 
-def agent_config_path(agent: str) -> Path:
-    """The config file of an eval agent (``firebreak/agents/configs/<agent>.yaml``)."""
+def _known_agents() -> dict[str, Path]:
+    """Eval agents: ``<name>.yaml`` configs and profile directories holding ``*.yaml`` files."""
     known = {p.stem: p for p in CONFIGS_DIR.glob("*.yaml")}  # exact, case-sensitive stems
-    path = known.get(agent)
+    for d in CONFIGS_DIR.iterdir():
+        if d.is_dir() and not d.name.startswith((".", "_")) and any(d.glob("*.yaml")):
+            known.setdefault(d.name, d)
+    return known
+
+
+def agent_config_path(agent: str) -> Path:
+    """An eval agent's config: ``configs/<agent>.yaml``, or its profile dir ``configs/<agent>/``."""
+    path = _known_agents().get(agent)
     if path is None:
-        raise EvalRunError(f"unknown agent {agent!r}; known agents: {sorted(known)}")
+        raise EvalRunError(f"unknown agent {agent!r}; known agents: {sorted(_known_agents())}")
     return path
 
 
-def agent_models(agent: str) -> list[str]:
-    """The agent's model and fallback model, read from its config."""
+def is_profile(agent: str) -> bool:
+    """True for a multi-agent profile directory (run through ``IncidentWorkflow``)."""
+    return agent_config_path(agent).is_dir()
+
+
+def agent_config_paths(agent: str) -> list[Path]:
+    """Every config file of an eval agent: one yaml, or each yaml in its profile, sorted."""
     path = agent_config_path(agent)
-    try:
-        cfg = AgentConfig.model_validate(yaml.safe_load(path.read_text()))
-    except (OSError, yaml.YAMLError, ValidationError) as exc:
-        raise EvalRunError(f"cannot read agent config {path}: {exc}") from exc
-    return [m for m in (cfg.model, cfg.fallback_model) if m]
+    return sorted(path.glob("*.yaml")) if path.is_dir() else [path]
+
+
+def agent_models(agent: str) -> list[str]:
+    """The models (and fallback models) of the agent's config(s); a profile gives their union."""
+    models: list[str] = []
+    for path in agent_config_paths(agent):
+        try:
+            cfg = AgentConfig.model_validate(yaml.safe_load(path.read_text()))
+        except (OSError, yaml.YAMLError, ValidationError) as exc:
+            raise EvalRunError(f"cannot read agent config {path}: {exc}") from exc
+        models += [m for m in (cfg.model, cfg.fallback_model) if m and m not in models]
+    return models
 
 
 def agent_providers(agent: str) -> set[str]:
@@ -383,7 +472,8 @@ def require_live_env(env: Mapping[str, str] | None = None, *, agent: str = "base
     """Record mode: refuse unless FIREBREAK_EVAL_LIVE=1 is set.
 
     ``ANTHROPIC_API_KEY`` is required only if the agent's model or fallback routes to
-    ``anthropic``; an all-local agent (``baseline-local``) needs no key.
+    ``anthropic`` (for a profile: any of its agents); an all-local agent (``baseline-local``,
+    ``multi-local``) needs no key.
     """
     env = os.environ if env is None else env
     if env.get(LIVE_FLAG) != "1":
@@ -426,6 +516,36 @@ async def record_scenario(
     if incident is None:
         raise EvalRunError(f"scenario {scenario.id}: incident {incident_id} not found")
     alerts = await live.list_alerts(incident_id)
+    if is_profile(agent):
+        await _install_incident(
+            EvalRepository(sessions),
+            sessions,
+            _for_workflow(RecordedRunInfo(incident=incident, alerts=alerts, latency_s=0.0)),
+        )
+        base = _multi_activities(agent, sessions, tools_settings)
+        try:
+            with record_multi(
+                directory,
+                agent=agent,
+                scenario=key,
+                at=utcnow(),
+                base=base,
+                adapters=adapters,
+                llm=llm,
+                overwrite=overwrite,
+            ) as run:
+                outcome, latency_s = await _workflow(
+                    scenario, incident_id, run, sessions, time_skipping=False
+                )
+        except MultiRecordError as exc:
+            raise EvalRunError(str(exc)) from exc
+        _write_run_file(
+            scenario,
+            directory,
+            RecordedRunInfo(incident=incident, alerts=alerts, latency_s=latency_s),
+        )
+        kinds = await EvalRepository(sessions).evidence_kinds(incident_id)
+        return ScenarioOutcome(scenario.id, _outcome_result(scenario, outcome, kinds, latency_s))
     await _install_incident(
         EvalRepository(sessions),
         sessions,
@@ -449,6 +569,12 @@ async def record_scenario(
             config_path=agent_config_path(agent),
         )
     info = RecordedRunInfo(incident=incident, alerts=alerts, latency_s=result.latency_s)
+    _write_run_file(scenario, directory, info)
+    kinds = await EvalRepository(sessions).evidence_kinds(incident_id)
+    return ScenarioOutcome(scenario.id, _to_result(scenario, result, kinds, result.latency_s))
+
+
+def _write_run_file(scenario: Scenario, directory: Path, info: RecordedRunInfo) -> None:
     (directory / RUN_FILE).write_text(info.model_dump_json(indent=2) + "\n", encoding="utf-8")
     leaked = find_secrets(directory, default_secrets())
     if leaked:
@@ -457,8 +583,85 @@ async def record_scenario(
             f"scenario {scenario.id}: a secret appears in {[p.name for p in leaked]}; "
             f"{RUN_FILE} was removed"
         )
-    kinds = await EvalRepository(sessions).evidence_kinds(incident_id)
-    return ScenarioOutcome(scenario.id, _to_result(scenario, result, kinds, result.latency_s))
+
+
+# --- multi-agent profiles (IncidentWorkflow) --------------------------------------------------
+
+
+def _for_workflow(info: RecordedRunInfo) -> RecordedRunInfo:
+    """The incident as installed for a workflow run: its grouping window already closed.
+
+    ``window_closes_at`` is clamped to ``opened_at`` (always in the past), so the workflow's
+    GROUPING wait (T-066) is a no-op in record and replay alike. The window is not part of any
+    prompt (``build_task`` doesn't show it), so this changes no LLM request.
+    """
+    inc = info.incident
+    closes = min(inc.window_closes_at, inc.opened_at)
+    return info.model_copy(update={"incident": inc.model_copy(update={"window_closes_at": closes})})
+
+
+def _multi_activities(
+    agent: str, sessions: SessionFactory, tools_settings: ToolSettings
+) -> AgentActivities:
+    """The real activities for ``agent``'s profile; the eval wrapper swaps in LLM and tools."""
+    return AgentActivities(
+        llm=UnsetLLM(),
+        sessions=sessions,
+        tools_settings=tools_settings,
+        settings=AgentSettings(profile=agent),
+        configs_dir=CONFIGS_DIR,
+    )
+
+
+async def _workflow(
+    scenario: Scenario,
+    incident_id: str,
+    run: MultiRun,
+    sessions: SessionFactory,
+    *,
+    time_skipping: bool,
+) -> tuple[WorkflowOutcome, float]:
+    try:
+        return await run_incident_workflow(
+            incident_id,
+            run=run,
+            incident_activities=IncidentActivities(sessions),
+            time_skipping=time_skipping,
+        )
+    except WorkflowFailureError as exc:
+        # Not a graded result: the workflow itself failed (e.g. the incident was not found).
+        raise EvalRunError(
+            f"scenario {scenario.id}: IncidentWorkflow failed: {exc.cause or exc}"
+        ) from exc
+
+
+async def replay_multi_scenario(
+    scenario: Scenario,
+    *,
+    agent: str,
+    root: Path,
+    sessions: SessionFactory,
+    tools_settings: ToolSettings,
+) -> ScenarioOutcome:
+    """Replay one recorded workflow run offline (time-skipping test server) and grade it."""
+    await require_eval_session(sessions)
+    key = scenario_key(scenario.id)
+    directory = recording_dir(agent, key, root)
+    if not (directory / META_FILE).exists():
+        logger.info("scenario %s: not recorded (no %s)", scenario.id, directory / META_FILE)
+        return ScenarioOutcome(scenario.id, None)
+    info = load_run_info(directory, scenario.id)
+    repo = EvalRepository(sessions)
+    await _install_incident(repo, sessions, _for_workflow(info))
+    base = _multi_activities(agent, sessions, tools_settings)
+    with replay_multi(directory, base=base) as run:
+        outcome, _ = await _workflow(scenario, info.incident.id, run, sessions, time_skipping=True)
+    prompt_sha = run.meta.prompt_sha256 if run.meta is not None else None
+    kinds = await repo.evidence_kinds(info.incident.id)
+    # Replay speed says nothing about the agents; report the recorded live latency.
+    return ScenarioOutcome(
+        scenario.id, _outcome_result(scenario, outcome, kinds, info.latency_s), prompt_sha
+    )
 
 
 #: Failures of one scenario in record mode that must not abort the others. ``LLMError`` covers
