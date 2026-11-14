@@ -50,6 +50,21 @@ def _require_test_database(url: str) -> None:
         )
 
 
+@pytest.fixture(autouse=True)
+def _no_live_temporal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point Temporal at a dead port for every test.
+
+    A test that forgets to stub Temporal then fails fast instead of starting workflows on a
+    live dev server, where the compose worker picks them up and fails on incidents that only
+    exist in the test database (seen 2026-11-14 from ``tests/integration``). Tests that need
+    Temporal inject their own client (``WorkflowEnvironment`` or a monkeypatched ``connect``).
+    """
+    import firebreak.api.temporal as api_temporal
+
+    monkeypatch.setenv("FIREBREAK_TEMPORAL_ADDRESS", "127.0.0.1:1")
+    monkeypatch.setattr(api_temporal, "_signaller", None)  # no signaller cached across tests
+
+
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     skip = pytest.mark.skip(reason=SKIP_REASON)
     for item in items:
