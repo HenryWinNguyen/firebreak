@@ -12,6 +12,7 @@ corrupting old ones (orphaned evidence from the dead attempt is harmless).
 """
 
 import asyncio
+import contextlib
 from datetime import timedelta
 
 from temporalio import workflow
@@ -22,6 +23,7 @@ with workflow.unsafe.imports_passed_through():
     from pydantic import BaseModel, ValidationError
 
     from firebreak.models.agents import AgentRunResult
+    from firebreak.models.common import Severity
     from firebreak.models.evidence import SpecialistReport
     from firebreak.models.incident import IncidentState
     from firebreak.models.llm import Usage
@@ -30,7 +32,9 @@ with workflow.unsafe.imports_passed_through():
         ACTIVITY_RUN_AGENT,
         ACTIVITY_SET_INCIDENT_STATE,
         AGENT_TASK_QUEUE,
+        SIGNAL_ALERT_ADDED,
         AgentTask,
+        AlertAdded,
         IncidentContext,
         Plan,
         SpecialistTask,
@@ -73,9 +77,23 @@ class IncidentWorkflow:
     def __init__(self) -> None:
         self._runs: list[AgentRunResult] = []
         self._usage = Usage()
+        # Signal-with-start delivers ``alert_added`` before ``run`` starts, so this state must
+        # exist after ``__init__``.
+        self._critical_seen = False
+        self._window_closed = False
 
-    @workflow.run
-    async def run(self, incident_id: str) -> WorkflowOutcome:
+    @workflow.signal(name=SIGNAL_ALERT_ADDED)
+    def alert_added(self, alert: AlertAdded) -> None:
+        if self._window_closed:
+            # Later alerts are in a new incident (grouper), or already in the reloaded context.
+            workflow.logger.info(
+                "alert %s signalled after the grouping window closed; ignored", alert.alert_id
+            )
+            return
+        if alert.severity is Severity.CRITICAL:
+            self._critical_seen = True
+
+    async def _load_context(self, incident_id: str) -> IncidentContext:
         ctx: IncidentContext = await workflow.execute_activity(
             ACTIVITY_LOAD_CONTEXT,
             incident_id,
@@ -84,6 +102,32 @@ class IncidentWorkflow:
             start_to_close_timeout=DB_TIMEOUT,
             retry_policy=RETRY,
         )
+        return ctx
+
+    async def _wait_for_window(self, ctx: IncidentContext) -> None:
+        """Wait until ``window_closes_at`` or a critical alert. ``None``/past: no wait."""
+        if ctx.window_closes_at is None:
+            return
+        remaining = ctx.window_closes_at - workflow.now()
+        if remaining <= timedelta(0):
+            return
+        # TimeoutError means the window elapsed: the normal way out.
+        with contextlib.suppress(TimeoutError):
+            await workflow.wait_condition(lambda: self._critical_seen, timeout=remaining)
+
+    @workflow.run
+    async def run(self, incident_id: str) -> WorkflowOutcome:
+        ctx = await self._load_context(incident_id)
+
+        # GROUPING: the Postgres grouper owns membership; the workflow only waits for the
+        # window. Residual race: the API (grouper) and Temporal clocks can differ slightly, so
+        # an alert may be grouped just after this timer fires. It is then ignored here and is
+        # simply absent from the reloaded context (a small, accepted window).
+        await self._set_state(incident_id, IncidentState.GROUPING)
+        await self._wait_for_window(ctx)
+        self._window_closed = True
+        # Reload so alerts and services that joined during the window reach every later agent.
+        ctx = await self._load_context(incident_id)
 
         # TRIAGE
         await self._set_state(incident_id, IncidentState.TRIAGE)

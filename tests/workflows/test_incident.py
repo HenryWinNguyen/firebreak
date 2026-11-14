@@ -196,6 +196,7 @@ async def test_happy_path() -> None:
 async def test_states_recorded_in_order() -> None:
     _, stub = await run_incident(HAPPY)
     assert stub.states == [
+        IncidentState.GROUPING,
         IncidentState.TRIAGE,
         IncidentState.PLANNING,
         IncidentState.INVESTIGATING,
@@ -210,7 +211,7 @@ async def test_noise_is_dismissed(verdict: TriageVerdict) -> None:
     assert out.final_state == IncidentState.DISMISSED
     assert out.report is None
     assert stub.calls == ["triage"]
-    assert stub.states == [IncidentState.TRIAGE, IncidentState.DISMISSED]
+    assert stub.states == [IncidentState.GROUPING, IncidentState.TRIAGE, IncidentState.DISMISSED]
 
 
 def _raises(task: AgentTask) -> AgentRunResult:
@@ -290,7 +291,12 @@ async def test_invalid_supervisor_output_escalates() -> None:
     assert out.final_state == IncidentState.ESCALATED
     assert out.error is not None and "supervisor" in out.error
     assert stub.calls == ["triage", "supervisor"]
-    assert stub.states == [IncidentState.TRIAGE, IncidentState.PLANNING, IncidentState.ESCALATED]
+    assert stub.states == [
+        IncidentState.GROUPING,
+        IncidentState.TRIAGE,
+        IncidentState.PLANNING,
+        IncidentState.ESCALATED,
+    ]
 
 
 async def test_triage_without_output_escalates() -> None:

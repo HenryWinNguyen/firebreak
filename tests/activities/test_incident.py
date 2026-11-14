@@ -1,11 +1,15 @@
+from datetime import datetime
+
 import pytest
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from firebreak.activities.incident import IncidentActivities
 from firebreak.db.repositories import AlertRepository, IncidentRepository
-from firebreak.models.incident import IncidentState
+from firebreak.models.alert import Alert
+from firebreak.models.incident import Incident, IncidentState
 from firebreak.models.orchestration import StateUpdate
 from tests.db.test_repositories import make_alert, make_incident
 
@@ -52,3 +56,26 @@ async def test_set_incident_state_unknown_incident_is_non_retryable(sessions: Se
             StateUpdate(incident_id="inc_missing", state=IncidentState.TRIAGE),
         )
     assert exc.value.non_retryable
+
+
+async def test_load_context_carries_aware_window_closes_at(sessions: Sessions) -> None:
+    inc = await IncidentRepository(sessions).create(make_incident())
+    ctx = await ActivityEnvironment().run(IncidentActivities(sessions).load_context, inc.id)
+    assert ctx.window_closes_at == inc.window_closes_at
+    assert ctx.window_closes_at is not None and ctx.window_closes_at.tzinfo is not None
+
+
+async def test_load_context_naive_window_fails_validation(sessions: Sessions) -> None:
+    naive = make_incident().model_copy(update={"window_closes_at": datetime(2026, 1, 1, 12, 0)})
+
+    class NaiveRepo:
+        async def get(self, incident_id: str) -> Incident:
+            return naive
+
+        async def list_alerts(self, incident_id: str) -> list[Alert]:
+            return []
+
+    acts = IncidentActivities(sessions)
+    acts._repo = NaiveRepo()  # type: ignore[assignment]
+    with pytest.raises(ValidationError):
+        await ActivityEnvironment().run(acts.load_context, naive.id)
