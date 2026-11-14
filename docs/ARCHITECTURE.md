@@ -129,6 +129,8 @@ text goes in the `explanation` fields and only an LLM judge grades it.
      `(environment, service-dependency-cluster)`.
    - Alerts on services that are linked in the service dependency graph
      (a static YAML for v1) join the same open incident.
+   - *(Implemented differently, CONTRACTS v1.7: the Postgres grouper decides membership; the workflow only
+     waits for the window as a timer. CONTRACTS wins where this section differs.)*
    - The window is a Temporal **timer** inside the workflow. The first
      alert starts it, and later alerts arrive as `add_alert` **signals**
      to the existing workflow (signal-with-start). Grouping survives

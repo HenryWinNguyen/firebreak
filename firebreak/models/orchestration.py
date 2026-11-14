@@ -85,7 +85,8 @@ class IncidentContext(BaseModel):
     summary: str
     services: list[str]
     window_closes_at: AwareDatetime | None = Field(
-        default=None, description="Grouping window end (v1.7); the workflow waits for it"
+        default=None,
+        description="Grouping window end (v1.7); the workflow waits for it. None: no wait",
     )
     triage: TriageResult | None = None
     plan: Plan | None = None
