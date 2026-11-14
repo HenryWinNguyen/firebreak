@@ -126,3 +126,84 @@ async def test_connect_hang_is_bounded(
     assert r.status_code == 200
     assert time.monotonic() - start < 2  # one bounded attempt; the rest are skipped
     assert len([x for x in caplog.records if x.levelno == logging.ERROR]) == 3
+
+
+async def test_concurrent_webhooks_with_hanging_connect_share_one_bound(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attempts = 0
+
+    async def hang(*_a: object, **_k: object) -> Client:
+        nonlocal attempts
+        attempts += 1
+        await asyncio.sleep(3600)
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(api_temporal, "connect", hang)
+    real = IncidentSignaller(SignalSettings(temporal_signal_timeout_s=0.3))
+    app.dependency_overrides[api_temporal.get_signaller] = lambda: real
+    start = time.monotonic()
+    rs = await asyncio.gather(*(post(client, am_alert(f"fp{i}")) for i in range(10)))
+    assert all(r.status_code == 200 for r in rs)
+    assert time.monotonic() - start < 1.0  # ~one bound, not 10 x 0.3 s
+    assert attempts == 1  # one shared connect attempt
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+async def test_connect_failure_fails_fast_then_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
+    connects = 0
+    sent: list[str] = []
+    fake_client = object()
+
+    async def flaky_connect(*_a: object, **_k: object) -> object:
+        nonlocal connects
+        connects += 1
+        if connects == 1:
+            raise ConnectionError("down")
+        return fake_client
+
+    async def fake_signal(c: object, incident_id: str, alert: AlertAdded) -> None:
+        assert c is fake_client
+        sent.append(incident_id)
+
+    monkeypatch.setattr(api_temporal, "connect", flaky_connect)
+    monkeypatch.setattr(api_temporal, "signal_alert_added", fake_signal)
+    clock = FakeClock()
+    s = IncidentSignaller(
+        SignalSettings(temporal_signal_timeout_s=1, temporal_connect_retry_s=20), clock=clock
+    )
+    a = AlertAdded(alert_id="al_1", severity=Severity.WARNING)
+    with pytest.raises(ConnectionError):
+        await s.signal("inc_1", a)
+    clock.now += 10  # inside the negative-cache window: no new connect attempt
+    with pytest.raises(ConnectionError):
+        await s.signal("inc_1", a)
+    assert connects == 1
+    clock.now += 11  # window over: retried, and the failure was not cached forever
+    await s.signal("inc_1", a)
+    assert connects == 2 and sent == ["inc_1"]
+    await s.signal("inc_1", a)  # connected client is cached
+    assert connects == 2 and sent == ["inc_1", "inc_1"]
+
+
+async def test_hanging_signal_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def ok_connect(*_a: object, **_k: object) -> object:
+        return object()
+
+    async def hang_signal(*_a: object, **_k: object) -> None:
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(api_temporal, "connect", ok_connect)
+    monkeypatch.setattr(api_temporal, "signal_alert_added", hang_signal)
+    s = IncidentSignaller(SignalSettings(temporal_signal_timeout_s=0.2))
+    start = time.monotonic()
+    with pytest.raises(TimeoutError):
+        await s.signal("inc_1", AlertAdded(alert_id="al_1", severity=Severity.WARNING))
+    assert time.monotonic() - start < 1.0

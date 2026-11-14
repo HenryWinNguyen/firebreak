@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from temporalio import activity
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from firebreak.models.agents import AgentRunResult
 from firebreak.models.common import Severity
@@ -169,3 +170,20 @@ async def test_happy_path_after_window() -> None:
             out = await handle.result()
     assert out.final_state == IncidentState.REPORT_ONLY
     assert stub.contexts["synthesizer"].summary == "load-2"
+
+
+async def test_signal_to_finished_workflow_is_logged_not_raised(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Finished:
+        async def start_workflow(self, *_a: object, **_k: object) -> None:
+            raise WorkflowAlreadyStartedError("incident-inc_1", "IncidentWorkflow")
+
+    with caplog.at_level(logging.INFO):
+        await signal_alert_added(
+            Finished(),  # type: ignore[arg-type]
+            "inc_1",
+            AlertAdded(alert_id="al_1", severity=Severity.WARNING),
+        )
+    rec = [r for r in caplog.records if "already finished" in r.getMessage()]
+    assert len(rec) == 1 and rec[0].levelno == logging.INFO
