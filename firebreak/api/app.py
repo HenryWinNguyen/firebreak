@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from firebreak.api.deps import dispose_engines
+from firebreak.api.temporal import close_signaller
 from firebreak.api.webhooks import router as webhooks_router
 
 
@@ -12,7 +13,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        await dispose_engines()
+        try:
+            await close_signaller()
+        finally:
+            await dispose_engines()
 
 
 app = FastAPI(title="Firebreak", lifespan=lifespan)
