@@ -340,6 +340,21 @@ class IncidentRepository:
         if updated.first() is None:
             raise IncidentNotFoundError(incident_id)
 
+    async def set_state(self, incident_id: str, state: IncidentState) -> None:
+        """Set the incident's state and bump ``updated_at``.
+
+        Idempotent (setting the same state twice is fine). Raises ``IncidentNotFoundError``.
+        """
+        async with self._sessions() as session, session.begin():
+            updated = await session.execute(
+                update(IncidentRow)
+                .where(IncidentRow.id == incident_id)
+                .values(state=state.value, updated_at=utcnow())
+                .returning(IncidentRow.id)
+            )
+            if updated.first() is None:
+                raise IncidentNotFoundError(incident_id)
+
     async def get(self, incident_id: str) -> Incident | None:
         async with self._sessions() as session:
             row = await session.get(IncidentRow, incident_id)
