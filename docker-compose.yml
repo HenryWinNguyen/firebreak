@@ -22,9 +22,11 @@ services:
     env_file: .env
     environment:
       FIREBREAK_DATABASE_URL: postgresql+asyncpg://firebreak:firebreak@postgres:5432/firebreak
+      FIREBREAK_TEMPORAL_ADDRESS: temporal:7233
     ports: ["8000:8000"]
     depends_on:
       postgres: { condition: service_healthy }
+      temporal: { condition: service_healthy }
 
   # Temporal dev server (CLI image): SQLite on a volume, so history survives restarts (~85 MiB).
   # One container instead of server + its own Postgres; fine for dev (CONTRACTS §3.3, M5).

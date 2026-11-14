@@ -1,4 +1,4 @@
-# Contracts (v1.6)
+# Contracts (v1.7)
 
 The seams between tracks. **Lead-only.** Builders read this and must not edit
 it or `firebreak/models/`. To change something, message `lead` with the
@@ -12,6 +12,7 @@ are a checkpoint.
 | v1.5 | 2026-10-29 | Additive: Shopfloor metric `db_queries_total{service}` (T-056) |
 | v1.1 | 2026-10-27 | Additive (T-032 requests): `AgentRunResult.error`, `LLMRequest.fallback_model`; `Evidence.raw_ref` ownership rule |
 | v1.6 | 2026-11-14 | Additive (M5): `orchestration` module (workflow ↔ activity types, task queues, activity names); Temporal at 7233 |
+| v1.7 | 2026-11-14 | Additive (M5, T-066): `IncidentContext.window_closes_at`, `AlertAdded`, signal `SIGNAL_ALERT_ADDED` |
 
 ---
 
@@ -26,7 +27,7 @@ are a checkpoint.
 | `reasoning` | `Hypothesis`, `RootCauseCategory`, `InvestigationReport`, `finding_ref`, `ProposedAction`, `ActionType`, `RiskTier` | synthesizer/remediator → policy, evals |
 | `llm` | `LLMClient` (Protocol), `LLMRequest`, `LLMResponse`, `ToolSpec`, `ToolAccess`, `Usage` | llm (T-031) → agent runtime (T-032) |
 | `agents` | `AgentConfig`, `ToolCallRecord`, `AgentRunResult` | agent runtime (T-032) → workflows |
-| `orchestration` (v1.6) | `TriageVerdict`, `TriageResult`, `SpecialistTask`, `Plan`, `IncidentContext`, `AgentTask`, `StateUpdate`, `WorkflowOutcome`, task-queue and activity-name constants | workflow (core, T-064) ↔ activities (agents, T-065) |
+| `orchestration` (v1.6) | `TriageVerdict`, `TriageResult`, `SpecialistTask`, `Plan`, `IncidentContext`, `AgentTask`, `StateUpdate`, `WorkflowOutcome`, `AlertAdded` (v1.7), task-queue, activity- and signal-name constants | workflow (core, T-064) ↔ activities (agents, T-065) |
 
 Rules:
 - Ids are prefixed (`al_`, `inc_`, `ev_`, `hy_`, `act_`) and made with `new_id`.
@@ -37,6 +38,7 @@ Rules:
 - `Finding.evidence_ids` must be non-empty. The runtime also checks they exist with `EvidenceSink.exists`.
 - `common.deterministic(seed, at=...)` (v1.4): seeds `new_id` and freezes `utcnow` for the current context. Run-path code must get ids from `new_id` and time from `utcnow()` (never `uuid4`/`datetime.now` directly), or replay breaks.
 - Orchestration (v1.6): `IncidentWorkflow` (workflow id `incident-<incident_id>`, queue `ORCHESTRATOR_TASK_QUEUE`) calls only the activities named by the `ACTIVITY_*` constants, on `AGENT_TASK_QUEUE`. `run_agent` returns `AgentRunResult`; the workflow validates `output` as the agent's schema (`TriageResult` for `triage`, `Plan` for `supervisor`, `SpecialistReport` for specialists, `InvestigationReport` for `synthesizer`). A run that ends without valid output is a result (`stopped_reason`/`error`), not an activity failure; infrastructure errors raise. Clients and workers use `pydantic_data_converter`. Address from `FIREBREAK_TEMPORAL_ADDRESS` (default `localhost:7233`), namespace `default`.
+- Grouping (v1.7): ingest sends `SIGNAL_ALERT_ADDED` with signal-with-start for every firing, non-duplicate alert it groups (workflow id `incident-<incident_id>`). The workflow waits in `GROUPING` until `IncidentContext.window_closes_at` (a Temporal timer) or a `critical` `AlertAdded`, then triages. Alerts signalled after the window are logged and ignored (the grouper puts later alerts in a new incident). This replaces ARCH §3's "timer in the workflow is the window": the Postgres grouper stays the source of truth for membership, the workflow only waits.
 - `InvestigationReport` (v1.3): `Hypothesis.supporting_findings`/`contradicting_findings` are refs `f<index>` into the report's own `findings`; ranks are exactly `1..n`, at most 3 hypotheses. The single-agent baseline (M3) returns it; the synthesizer (M5) will too.
 
 ## 2. Shopfloor (target system)
