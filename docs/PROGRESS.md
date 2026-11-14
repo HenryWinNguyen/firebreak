@@ -3,39 +3,25 @@
 Reverse-chronological log of milestones. See [SCOPE.md](../SCOPE.md) for the
 milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 
-## ⏸ Waiting on Henry: CP1 (baseline review, go/no-go on M5)
-
-**Baseline** (`baseline-local`, `qwen3:8b` on Ollama, $0, S1–S6; full table in `evals/REPORT.md`):
-top-1 2/6 (S1, S4), top-3 3/6 (+S2), S3 wrong (resource_exhaustion, didn't query `db_queries_total`),
-S5/S6 invalid final answers (empty supporting findings; invented evidence ids), required evidence kinds cited 0/6,
-latency p50 180 s / p95 448 s. Replay is exact and runs in CI.
-
-**What the numbers say:** the single agent stops early (2–7 steps), skips the evidence a scenario needs, and invents
-citations. That's what M5 (supervisor + parallel specialists + synthesizer) and M6 (citation enforcement, critic) target.
-
-**Questions:**
-1. **Go on M5** (Temporal orchestration, per SCOPE M5 / ARCHITECTURE §§3–5)? *Recommended: go.* S7 stays a known
-   gap until T-053.
-2. **T-053 (S7 never fires):** (a) multi-process Python load generator in the driver (no new tool; may still not
-   saturate on this Mac), (b) k6 container (heavier, new dependency), or (c) lower orders capacity for S7 only
-   (e.g. a scenario-scoped worker/CPU cap; deterministic, but changes what "no bug" means). *Recommended: (a) first,
-   time-boxed; fall back to (c).*
-3. **Memory:** M5 adds Temporal + its Postgres to compose (est. ~0.5–1 GB, not measured). With Ollama 8B at 32k ctx the Mac is already
-   tight. OK to stop Loki/Promtail during non-log scenarios if needed, or record with a smaller context?
-
-**Proposed M5 breakdown** (one builder per AGENT_WORKFLOW §2, plus the §8 same-task comparison):
-- T-063 ADR 001: Temporal vs. a plain asyncio state machine for this scale (lead-written, short)
-- T-064 Temporal server + workers in compose; health checks; `make up` still fits in memory
-- T-065 `IncidentWorkflow` skeleton: states GROUPING → … → SYNTHESIZING, activities stubbed, kill-the-worker test (the §8 two-builder comparison)
-- T-066 Supervisor + specialists (metrics, logs, deploys) as activities on the existing runtime/tool gateway
-- T-067 Synthesizer + `multi-local` agent config; record S1–S6, compare to baseline
-
 ## Current status
 
-**M4: harness done; local $0 baseline recorded for S1–S6 (top-1 33%, top-3 50%). S7 waits on T-053. At CP1 (waiting on Henry, see top).** M1–M3 done. CP0 passed 2026-10-27. Paid Claude run optional (T-042). Board: `docs/tasks/BOARD.md`.
+**M5 in progress (Temporal orchestration). CP1 passed 2026-11-14.** M1–M4 done (S7 waits on T-053). CP0 passed 2026-10-27. Paid Claude run optional (T-042). Board: `docs/tasks/BOARD.md`.
 Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
 ## Log
+
+### 2026-11-14: CP1 passed; M5 started
+- **CP1 (Henry, 2026-11-14): go on M5.** Baseline reviewed: `baseline-local` S1–S6 top-1 2/6, top-3 3/6, required
+  evidence cited 0/6, S5/S6 invalid (empty support; invented evidence ids). S7 stays a gap until T-053.
+  Also decided: T-053 tries a multi-process load generator first, time-boxed, fallback a scenario-scoped orders capacity
+  cap; OK to stop log services or shrink the Ollama context if memory runs out.
+- Contracts **v1.6** (additive): `firebreak/models/orchestration.py` (`TriageResult`, `Plan`, `SpecialistTask`,
+  `IncidentContext`, `AgentTask`, `StateUpdate`, `WorkflowOutcome`, task queues, activity names) and the workflow ↔
+  activity rule in CONTRACTS §1.
+- Temporal in compose: the CLI dev server (`temporalio/temporal:1.9.1`, SQLite on a volume, ~85 MiB), instead of the
+  server plus its own Postgres from ARCHITECTURE §1. Checked: history survives a container restart. Ports 7233/8233.
+- ADR-001 (Temporal) already accepted, so no new ADR. Specs: **T-064** workflow skeleton + worker (two builders,
+  AGENT_WORKFLOW §8 comparison), **T-065** local multi-agent roster + `run_agent` activity, **T-053** S7 load.
 
 ### 2026-11-01: T-060, T-061, T-062 merged (review minors); `replay` is a required check
 - **T-060** (#78): `make eval AGENT=all` replays only agent dirs that hold recordings (`skip <dir>: no recordings`

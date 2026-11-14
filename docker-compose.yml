@@ -26,5 +26,18 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
 
+  # Temporal dev server (CLI image): SQLite on a volume, so history survives restarts (~85 MiB).
+  # One container instead of server + its own Postgres; fine for dev (CONTRACTS §3.3, M5).
+  temporal:
+    image: temporalio/temporal:1.9.1
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--db-filename", "/home/temporal/temporal.db"]
+    ports: ["7233:7233", "8233:8233"]
+    volumes: [temporaldata:/home/temporal]
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health"]
+      interval: 5s
+      retries: 20
+
 volumes:
   pgdata:
+  temporaldata:
