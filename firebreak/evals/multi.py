@@ -30,19 +30,27 @@ Design (how record and replay stay identical with parallel specialists):
 - **Retries and timeouts in record.** Local models are slow, so specialists do time out and model
   servers do drop connections; degraded runs (ARCH §4.3) are part of what the evals measure.
   Temporal's retry policy applies unchanged. Each attempt is stopped ``DEADLINE_MARGIN_S`` before
-  its start_to_close (``ActivityTimeout``, retryable), so an attempt that would finish just after
-  Temporal's timeout is never kept as a success the workflow didn't see. Temporal doesn't cancel
+  its start_to_close (``ActivityTimeout``, retryable; the timer starts after any cancel-wait and
+  lock), and a result that still arrives after start_to_close is recorded as a failure, so an
+  attempt Temporal timed out is never kept as a success. Temporal doesn't cancel
   an in-process attempt itself (no heartbeats), so attempt ``n > 1`` also cancels any abandoned
   earlier attempt and waits for its cleanup, then re-records its call from scratch with its own seed
   ``<scenario>/<key>#a<n>@<at>``, so its evidence ids never collide with a dead attempt's rows
   (``EvidenceConflictError``). Only the attempt that returned is kept; ``replay_run`` reads each
   call's seed from its ``meta.json``.
 - **Terminal failures.** A call whose last attempt failed (retries exhausted, non-retryable error,
-  final timeout) is kept as ``calls/<key>/failed.json`` (``FailedCall``). Replay raises the same
-  failure for that key at once, as a non-retryable ``ApplicationError``, so the workflow degrades
-  (or escalates) exactly as it did live: same ``degraded_sources``, same synthesizer prompt, same
-  report. Temporal's own error text for a timed-out non-specialist can't be reproduced from an
-  activity, so the runner stores the recorded outcome's ``error`` in ``run.json`` and uses it.
+  final timeout) is kept as ``calls/<key>/failed.json`` (``FailedCall``) plus that attempt's first
+  LLM request (``first_request.json``, its fixture key in ``FailedCall.llm_steps``). Replay runs
+  the agent up to that first request, checks it against the recording (prompt, tool schemas,
+  model and task: a difference is ``StaleRecordingError`` naming the call), then raises the
+  recorded failure as a non-retryable ``ApplicationError``. The workflow degrades (or escalates)
+  exactly as it did live: same ``degraded_sources``, same synthesizer prompt, same report. The
+  scenario ``prompt_sha256`` covers these first requests too. Temporal's own error text for a
+  timed-out non-specialist can't be reproduced from an activity, so the runner stores the
+  recorded outcome's ``error`` in ``run.json`` and uses it when the same agent escalated.
+- **Consistency.** After a recorded workflow, the completed calls per agent must equal the
+  workflow's ``agent_runs`` per agent, and every degraded agent must have a failed or completed
+  call; otherwise the recording could not replay and is refused.
 - **Recording problems** (a secret in a recording, a failed write, stable keys impossible) are
   not agent failures: they abort the workflow at once (no more model time is spent) and nothing
   is kept.
@@ -66,6 +74,7 @@ Layout::
             llm/<key>.json
         calls/<call key>/      or, for a call that failed terminally while recording
             failed.json
+            first_request.json     (absent if it failed before its first LLM request)
 
 Record uses the local Temporal dev server (``start_local``: real time, so real LLM latency
 meets the real activity timeouts); replay uses the time-skipping test server. Both are started
@@ -89,7 +98,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import NoReturn, Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from temporalio import activity
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.exceptions import ApplicationError
@@ -99,6 +108,7 @@ from temporalio.worker import Worker
 from firebreak.activities.agents import NON_SPECIALISTS, AgentActivities
 from firebreak.evals.cassette import (
     META_FILE,
+    Cassette,
     CassetteMode,
     RecordingMeta,
     SecretInRecordingError,
@@ -114,7 +124,9 @@ from firebreak.evals.cassette import (
 )
 from firebreak.ingest.service_graph import ServiceGraph
 from firebreak.llm.client import KeyLoggingRecorder
+from firebreak.llm.fixtures import first_difference, fixture_key
 from firebreak.models.agents import AgentRunResult
+from firebreak.models.common import deterministic
 from firebreak.models.llm import LLMClient, LLMRequest, LLMResponse
 from firebreak.models.orchestration import (
     ACTIVITY_RUN_AGENT,
@@ -148,6 +160,7 @@ logger = logging.getLogger(__name__)
 
 CALLS_DIR = "calls"
 FAILED_FILE = "failed.json"
+FIRST_REQUEST_FILE = "first_request.json"
 FAILED_FORMAT_VERSION = 1
 #: How long identical sibling tasks wait for each other to start (they are scheduled together).
 DEFAULT_GROUP_TIMEOUT_S = 60.0
@@ -179,6 +192,9 @@ class FailedCall(BaseModel):
     error_type: str
     message: str
     attempts: int
+    #: Fixture key of the final attempt's first LLM request (empty if it failed before one).
+    #: The request itself is ``first_request.json`` next to this file; replay checks it.
+    llm_steps: list[str] = Field(default_factory=list)
 
 
 class UnsetLLM:
@@ -226,14 +242,58 @@ def _stale_in(exc: BaseException) -> StaleRecordingError | None:
     return None
 
 
-def _remaining_s(info: activity.Info) -> float | None:
-    """Seconds this attempt may still run in record mode (``DEADLINE_MARGIN_S`` before its
-    start_to_close), or None without a timeout."""
+def _remaining_s(info: activity.Info, margin_s: float) -> float | None:
+    """Seconds until ``margin_s`` before this attempt's start_to_close (None: no timeout)."""
     limit = info.start_to_close_timeout
     if not limit:
         return None
     elapsed = (datetime.now(UTC) - info.started_time).total_seconds()
-    return max(0.0, limit.total_seconds() - DEADLINE_MARGIN_S - elapsed)
+    return limit.total_seconds() - margin_s - elapsed
+
+
+class _FirstRequest:
+    """Passes calls through and keeps the attempt's first request, logged when it is *sent*
+    (a timed-out attempt may never get its answer)."""
+
+    def __init__(self, inner: LLMClient) -> None:
+        self._inner = inner
+        self.first: LLMRequest | None = None
+
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        if self.first is None:
+            self.first = request.model_copy(deep=True)
+        return await self._inner.complete(request)
+
+
+class _FailedCallLLM:
+    """Replay of a call that failed while recording: step 1 must match the recorded request
+    (prompt, tools, model, task), then the recorded failure is raised where the recording ends.
+    """
+
+    def __init__(self, failed: FailedCall, recorded: LLMRequest, scenario: str) -> None:
+        self._failed = failed
+        self._recorded = recorded
+        self._scenario = scenario
+
+    def failure(self) -> ApplicationError:
+        f = self._failed
+        return ApplicationError(
+            f"recorded failure after {f.attempts} attempt(s): {f.message}",
+            type=f.error_type,
+            non_retryable=True,
+        )
+
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        key = fixture_key(request)
+        if key != self._failed.llm_steps[0]:
+            raise StaleRecordingError(
+                scenario=self._scenario,
+                step="llm step 1",
+                detail=first_difference(self._recorded, request)
+                + " (this call failed while recording)",
+                key=key,
+            )
+        raise self.failure()
 
 
 def _describe(e: BaseException) -> tuple[str, str]:
@@ -263,6 +323,7 @@ class _Status:
     ok: bool = False
     error_type: str = ""
     message: str = ""
+    first_request: LLMRequest | None = None
 
 
 class MultiRun:
@@ -289,6 +350,7 @@ class MultiRun:
         secrets: Sequence[str] | None = None,
         recorded_calls: Sequence[str] = (),
         failed_calls: dict[str, FailedCall] | None = None,
+        first_requests: dict[str, LLMRequest] | None = None,
         meta: RecordingMeta | None = None,
         group_timeout_s: float = DEFAULT_GROUP_TIMEOUT_S,
     ) -> None:
@@ -314,6 +376,8 @@ class MultiRun:
         self._groups: dict[tuple[str, str | None], _Group] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._running: dict[str, asyncio.Task[object]] = {}
+        #: Replay: each failed call's recorded first request (``first_request.json``).
+        self._first_requests: dict[str, LLMRequest] = dict(first_requests or {})
         self._status: dict[str, _Status] = {}
         self._recorders: dict[str, KeyLoggingRecorder] = {}
         self._last_error: dict[str, str] = {}
@@ -430,7 +494,7 @@ class MultiRun:
                 self._problem(f"{task.agent}: {e}", e)
             raise MultiReplayError(f"{task.agent}: {e}") from e
         if self.mode is CassetteMode.RECORD:
-            return await self._record_attempt(key, task, info.attempt, _remaining_s(info))
+            return await self._record_attempt(key, task, info)
         return await self._replay_attempt(key, task, info.attempt)
 
     def _call_scenario(self, key: str, attempt: int) -> str:
@@ -438,13 +502,17 @@ class MultiRun:
         return base if attempt == 1 else f"{base}#a{attempt}"
 
     async def _record_attempt(
-        self, key: str, task: AgentTask, attempt: int, remaining_s: float | None
+        self, key: str, task: AgentTask, info: activity.Info
     ) -> AgentRunResult:
         if self._adapters is None or self._llm is None:  # guarded in __init__
             raise RuntimeError("record mode without adapters or LLM client")
+        attempt = info.attempt
         latest = self._status.get(key)
         if latest is None or attempt >= latest.attempt:
             self._status[key] = _Status(agent=task.agent, attempt=attempt)
+            # An earlier attempt's late success must not count once this attempt has started.
+            self._recorders.pop(key, None)
+            self.completed = [k for k in self.completed if k != key]
         # Temporal does not cancel an in-process attempt whose start_to_close expired (no
         # heartbeats), so the dead attempt may still be running: cancel it (it stops spending
         # model time) and let it finish its cleanup before this attempt records.
@@ -466,7 +534,13 @@ class MultiRun:
         async with lock:  # belt and braces: one attempt per key records at a time
             agent_error: BaseException | None = None
             recorder: KeyLoggingRecorder | None = None
-            timer = asyncio.timeout(remaining_s)
+            first: _FirstRequest | None = None
+            # Started only now: the cancel-wait and the lock above must not eat the margin.
+            remaining = _remaining_s(info, DEADLINE_MARGIN_S)
+            loop = asyncio.get_running_loop()
+            timer = asyncio.timeout_at(
+                None if remaining is None else loop.time() + max(0.0, remaining)
+            )
             try:
                 with record_run(
                     self.directory / CALLS_DIR / key,
@@ -479,9 +553,10 @@ class MultiRun:
                     overwrite=attempt > 1,
                 ) as rec:
                     recorder = rec.llm
+                    first = _FirstRequest(rec.llm)
                     try:
                         async with timer:
-                            result = await self._inner(rec.llm, rec.adapters).run_agent(task)
+                            result = await self._inner(first, rec.adapters).run_agent(task)
                     except BaseException as e:
                         agent_error = e
                         raise
@@ -492,20 +567,37 @@ class MultiRun:
                         f"call {key} attempt {attempt}: recording failed: {type(e).__name__}: {e}",
                         e,
                     )
+                first_request = first.first if first is not None else None
                 if timer.expired():
                     stopped = ApplicationError(
                         f"attempt {attempt} stopped {DEADLINE_MARGIN_S:.0f}s before its "
                         "start_to_close timeout",
                         type=LOCAL_TIMEOUT,
                     )
-                    self._attempt_failed(key, attempt, stopped)
+                    self._attempt_failed(key, attempt, stopped, first_request)
                     raise stopped from e  # retryable: Temporal's policy decides
-                self._attempt_failed(key, attempt, e)
+                self._attempt_failed(key, attempt, e, first_request)
                 raise  # Temporal's retry policy decides; attempt n+1 re-records from scratch
+        late = _remaining_s(info, 0.0)
+        if late is not None and late <= 0:
+            # Finished after start_to_close: Temporal already timed this attempt out and will
+            # drop the result, so the workflow sees a failure. Record it as one.
+            stopped = ApplicationError(
+                f"attempt {attempt} finished after its start_to_close timeout",
+                type=LOCAL_TIMEOUT,
+            )
+            self._attempt_failed(key, attempt, stopped, first.first if first else None)
+            raise stopped
         self._attempt_ok(key, attempt, recorder)
         return result
 
-    def _attempt_failed(self, key: str, attempt: int, e: BaseException) -> None:
+    def _attempt_failed(
+        self,
+        key: str,
+        attempt: int,
+        e: BaseException,
+        first_request: LLMRequest | None = None,
+    ) -> None:
         error_type, message = _describe(e)
         status = self._status[key]
         logger.warning(
@@ -518,6 +610,7 @@ class MultiRun:
         )
         if attempt >= status.attempt:
             status.ok, status.error_type, status.message = False, error_type, message
+            status.first_request = first_request
 
     def _attempt_ok(self, key: str, attempt: int, recorder: KeyLoggingRecorder | None) -> None:
         status = self._status[key]
@@ -540,13 +633,7 @@ class MultiRun:
             self._drift(stale, stale, key)
         failed = self.failed_calls.get(key)
         if failed is not None:
-            if key not in self.replayed_failures:
-                self.replayed_failures.append(key)
-            raise ApplicationError(
-                f"recorded failure after {failed.attempts} attempt(s): {failed.message}",
-                type=failed.error_type,
-                non_retryable=True,
-            )
+            return await self._replay_failed(key, task, failed)
         try:
             with replay_run(directory, graph=self._graph) as rp:
                 result = await self._inner(rp.llm, rp.adapters).run_agent(task)
@@ -568,6 +655,46 @@ class MultiRun:
             raise
         self.completed.append(key)
         return result
+
+    async def _replay_failed(self, key: str, task: AgentTask, failed: FailedCall) -> NoReturn:
+        """Run the agent up to its first LLM request, check it, raise the recorded failure."""
+        if key not in self.replayed_failures:
+            self.replayed_failures.append(key)
+        directory = self.directory / CALLS_DIR / key
+        recorded = self._first_requests.get(key)
+        if not failed.llm_steps or recorded is None:
+            # It failed before its first LLM request: there is nothing to compare.
+            raise ApplicationError(
+                f"recorded failure after {failed.attempts} attempt(s): {failed.message}",
+                type=failed.error_type,
+                non_retryable=True,
+            )
+        llm = _FailedCallLLM(failed, recorded, f"{self.scenario}/{key}")
+        # No tool results exist for a failed call: any tool call is drift.
+        adapters = Cassette(
+            CassetteMode.REPLAY, directory, scenario=f"{self.scenario}/{key}", graph=self._graph
+        ).adapters
+        try:
+            with deterministic(f"{self.scenario}/{key}#failed@{self.at.isoformat()}", at=self.at):
+                await self._inner(llm, adapters).run_agent(task)
+        except ApplicationError as e:
+            if e.type == failed.error_type and _stale_in(e) is None:
+                raise
+            found = _stale_in(e)
+            if found is not None:
+                self._drift(found, e, key)
+            raise
+        except Exception as e:
+            found = _stale_in(e)
+            if found is not None:
+                self._drift(found, e, key)
+            raise
+        stale = StaleRecordingError(
+            scenario=f"{self.scenario}/{key}",
+            step="end of call",
+            detail="the call failed while recording but returned a result in replay",
+        )
+        self._drift(stale, stale, key)
 
     # --- end of run --------------------------------------------------------------------
 
@@ -591,30 +718,65 @@ class MultiRun:
             path=str(self.directory / CALLS_DIR / missing[0]),
         )
 
+    def check_record(self, outcome: WorkflowOutcome) -> None:
+        """A recording must replay: what each call did must match what the workflow saw.
+
+        Every completed call returned a result the workflow recorded in ``agent_runs`` (valid or
+        not), so the completed keys per agent must equal the runs per agent. A mismatch (e.g. a
+        success Temporal had already timed out) is a recording problem.
+        """
+        completed: dict[str, int] = {}
+        for key in self.completed:
+            agent = self._status[key].agent
+            completed[agent] = completed.get(agent, 0) + 1
+        runs: dict[str, int] = {}
+        for r in outcome.agent_runs:
+            runs[r.agent] = runs.get(r.agent, 0) + 1
+        if completed != runs:
+            self.problems.append(
+                f"recorded calls per agent {dict(sorted(completed.items()))} do not match the "
+                f"workflow's agent runs {dict(sorted(runs.items()))}; this recording could not "
+                "replay"
+            )
+        failed_agents = {s.agent for s in self._status.values() if not s.ok}
+        for agent in outcome.degraded_sources:
+            if agent not in failed_agents and agent not in completed:
+                self.problems.append(
+                    f"{agent} is degraded but has neither a failed nor a completed call"
+                )
+
     def finish_record(self) -> None:
         """Write ``failed.json`` for every call whose last attempt failed (record mode)."""
         for key, status in sorted(self._status.items()):
             if status.ok:
                 continue
+            first = status.first_request
             failed = FailedCall(
                 agent=status.agent,
                 key=key,
                 error_type=status.error_type,
                 message=status.message,
                 attempts=status.attempt,
+                llm_steps=[] if first is None else [fixture_key(first)],
             )
             directory = self.directory / CALLS_DIR / key
             if directory.exists():  # an earlier attempt's sub-recording, superseded
                 shutil.rmtree(directory)
             directory.mkdir(parents=True)
+            if first is not None:
+                _atomic_write(
+                    directory / FIRST_REQUEST_FILE, first.model_dump_json(indent=2) + "\n"
+                )
+                self._first_requests[key] = first
             _atomic_write(directory / FAILED_FILE, failed.model_dump_json(indent=2) + "\n")
             self.failed_calls[key] = failed
 
     def scenario_meta(self, recorded_on: date | None = None) -> RecordingMeta:
         """The scenario-level ``meta.json`` from the completed calls (record mode)."""
-        calls = sorted(self._recorders)
+        calls = sorted(k for k in self._recorders if self._status[k].ok)
         metas = [_load_meta(self.directory / CALLS_DIR / k) for k in calls]
         requests = [r for k in calls for r in self._recorders[k].requests]
+        requests += [self._first_requests[k] for k in sorted(self._first_requests)]
         return RecordingMeta(
             agent=self.agent,
             scenario=self.scenario,
@@ -738,6 +900,16 @@ def replay_multi(
         for k in recorded
         if (calls_dir / k / FAILED_FILE).exists()
     }
+    first_requests: dict[str, LLMRequest] = {}
+    for k, f in failed.items():
+        path = calls_dir / k / FIRST_REQUEST_FILE
+        if f.llm_steps:
+            try:
+                first_requests[k] = LLMRequest.model_validate_json(path.read_text("utf-8"))
+            except (OSError, ValueError) as e:
+                raise StaleRecordingError(
+                    scenario=meta.scenario, step="setup", detail=f"{path} is unreadable ({e})"
+                ) from e
     run = MultiRun(
         CassetteMode.REPLAY,
         directory,
@@ -748,6 +920,7 @@ def replay_multi(
         graph=graph or ServiceGraph.load(),
         recorded_calls=recorded,
         failed_calls=failed,
+        first_requests=first_requests,
         meta=meta,
     )
     try:
@@ -819,4 +992,7 @@ async def run_incident_workflow(
                 await handle.terminate(reason="eval run aborted (recording problem or drift)")
                 run.raise_abort()
             outcome: WorkflowOutcome = await result
-            return outcome, time.monotonic() - started
+            latency = time.monotonic() - started
+            if run.mode is CassetteMode.RECORD:
+                run.check_record(outcome)
+            return outcome, latency

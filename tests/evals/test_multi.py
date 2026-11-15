@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from temporalio import activity
 
 import firebreak.agents.runtime as runtime
+import firebreak.evals.multi as multi
 from firebreak.activities.agents import AgentActivities
 from firebreak.agents.settings import AgentSettings
 from firebreak.db.repositories import SessionFactory
@@ -25,6 +26,7 @@ from firebreak.evals.cassette import META_FILE, RecordingMeta, StaleRecordingErr
 from firebreak.evals.multi import (
     CALLS_DIR,
     FAILED_FILE,
+    FIRST_REQUEST_FILE,
     LOCAL_TIMEOUT,
     FailedCall,
     MultiRecordError,
@@ -546,8 +548,10 @@ async def test_terminal_specialist_failure_is_recorded_and_replays_degraded(
         "LLMConnectionRefused",
     )
     assert sorted(p.name for p in (directory_for(tmp_path) / CALLS_DIR / deploys).iterdir()) == [
-        FAILED_FILE
+        FAILED_FILE,
+        FIRST_REQUEST_FILE,
     ]
+    assert len(failed.llm_steps) == 1  # the final attempt's step-1 request, kept for drift checks
 
     replayed, rp, rp_sink = await replay(tmp_path)
     assert rp.replayed_failures == [deploys]
@@ -596,8 +600,11 @@ async def test_specialist_timeout_then_retry_is_rerecorded(tmp_path: Path) -> No
     assert sorted(rp_sink.stored) == sorted(rec_sink.stored)
 
 
-async def test_specialist_timeout_on_every_attempt_replays_degraded(tmp_path: Path) -> None:
-    """The reviewer's case: a specialist that always times out is a degraded, kept recording."""
+async def test_specialist_timeout_on_every_attempt_replays_degraded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's case: a specialist that always times out is a degraded, kept recording,
+    and a later change to its prompt is still caught as drift."""
     live = SkewedLive({"instant": 13.0})
     recorded, _rec, rec_sink = await record(
         tmp_path, live=live, llm=ShortTimeoutLLM(), time_skipping=False
@@ -619,6 +626,9 @@ async def test_specialist_timeout_on_every_attempt_replays_degraded(tmp_path: Pa
     assert _outcome_result(S1, replayed, kinds(rp_sink), 1.0) == _outcome_result(
         S1, recorded, kinds(rec_sink), 1.0
     )
+    metrics_prompt_changed(monkeypatch)
+    with pytest.raises(StaleRecordingError, match=r"s01/metrics-[0-9a-f]{8}-0.*llm step 1"):
+        await replay(tmp_path)
 
 
 async def test_non_specialist_failure_escalates_identically(tmp_path: Path) -> None:
@@ -814,3 +824,69 @@ async def test_dropped_plan_tasks_are_recorded_and_checked(tmp_path: Path) -> No
     assert runner._check_outcome(SCENARIO, replayed, info, rp) == replayed
     with pytest.raises(StaleRecordingError, match="dropped"):
         runner._check_outcome(SCENARIO, replayed, info.model_copy(update={"dropped_tasks": []}), rp)
+
+
+def metrics_prompt_changed(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = runtime.build_system_prompt
+
+    def patched(prompt: str, schema: Any) -> str:
+        out = original(prompt, schema)
+        return out + "\nNEW METRICS INSTRUCTIONS" if "promql" in prompt.lower() else out
+
+    monkeypatch.setattr(runtime, "build_system_prompt", patched)
+
+
+async def test_failed_call_is_still_checked_for_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A call that failed while recording keeps its step-1 request: a changed prompt is stale."""
+    llm = FakeMultiLLM(PLAN, fail={"metrics": 99})
+    recorded, _, _ = await record(tmp_path, llm=llm)
+    assert recorded.degraded_sources == ["metrics"]
+    metrics_prompt_changed(monkeypatch)
+    with pytest.raises(StaleRecordingError, match=r"s01/metrics-[0-9a-f]{8}-0.*llm step 1"):
+        await replay(tmp_path)
+
+
+async def test_failed_call_prompt_sha_covers_its_first_request(tmp_path: Path) -> None:
+    llm = FakeMultiLLM(PLAN, fail={"metrics": 99})
+    await record(tmp_path, llm=llm)
+    with_failed = meta(directory_for(tmp_path)).prompt_sha256
+    other = tmp_path / "other"
+    await record(other, llm=FakeMultiLLM([PLAN[1]]))
+    assert with_failed != meta(directory_for(other)).prompt_sha256
+
+
+async def test_success_after_temporal_timeout_is_recorded_as_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The self-timeout lost the race (margin eaten): attempt 1's late result is a failure, as
+    Temporal saw it, and attempt 2 is the one kept, so the recording replays."""
+    monkeypatch.setattr(multi, "DEADLINE_MARGIN_S", -3.0)
+    llm = ShortTimeoutLLM(delays={("metrics", 0): 11.0}, delay_once=True)
+    recorded, rec, _ = await record(tmp_path, llm=llm, time_skipping=False)
+    key = call_key("metrics", PLAN[0][1], 0)
+    assert recorded.degraded_sources == [] and rec.completed.count(key) == 1
+    assert meta(directory_for(tmp_path) / CALLS_DIR / key).seed.startswith(f"{SCENARIO}/{key}#a2@")
+    replayed, _, _ = await replay(tmp_path)
+    assert no_timing(replayed) == no_timing(recorded)
+
+
+def test_record_consistency_check_refuses_unreplayable_recordings(tmp_path: Path) -> None:
+    run = MultiRun(
+        multi.CassetteMode.RECORD,
+        tmp_path,
+        agent="multi-local",
+        scenario=SCENARIO,
+        at=AT,
+        base=base_activities(FakeEvidenceSink()),
+        adapters=adapters(SkewedLive({})),
+        llm=FakeMultiLLM(PLAN),
+    )
+    run._status["metrics-x-0"] = multi._Status(agent="metrics", attempt=1, ok=True)
+    run.completed.append("metrics-x-0")
+    outcome = WorkflowOutcome(
+        incident_id=INCIDENT, final_state=IncidentState.REPORT_ONLY, degraded_sources=["metrics"]
+    )
+    run.check_record(outcome)  # metrics "completed" but the workflow never saw its run
+    assert run.problems and "could not replay" in run.problems[0]

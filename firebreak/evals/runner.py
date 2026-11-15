@@ -669,8 +669,15 @@ def _check_outcome(
             detail=f"replay ended (state, degraded, dropped) = {replayed}; the recording ended "
             f"{recorded}",
         )
-    if any(f.agent in NON_SPECIALISTS for f in run.failed_calls.values()):
-        return outcome.model_copy(update={"error": info.outcome_error})
+    for f in run.failed_calls.values():
+        prefix = f"{f.agent} activity failed:"
+        if (
+            f.agent in NON_SPECIALISTS
+            and (info.outcome_error or "").startswith(prefix)
+            and (outcome.error or "").startswith(prefix)
+        ):
+            # The same agent escalated the run in both modes; only Temporal's text differs.
+            return outcome.model_copy(update={"error": info.outcome_error})
     if outcome.error != info.outcome_error:
         raise StaleRecordingError(
             scenario=key,
