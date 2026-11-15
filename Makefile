@@ -38,6 +38,8 @@ logs:
 
 # AGENT=<dir under evals/recordings> or AGENT=all (every committed agent dir).
 # Replay exits non-zero only for stale recordings or errors; graded misses exit 0.
+# Profile agents (multi-local) replay IncidentWorkflow in-process on Temporal's time-skipping
+# test server; temporalio downloads and caches that binary on first use (needs network once).
 AGENT ?= baseline-local
 RECORDINGS_DIR ?= evals/recordings
 

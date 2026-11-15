@@ -110,19 +110,24 @@ async def seed_live_incident(sessions: SessionFactory) -> str:
     return inc.id
 
 
-LIVE_DB = "t045_live_test"
+def live_db_name(test_url: str) -> str:
+    """``<test db>_live_test``, derived from the test database: concurrent sessions using
+    different test databases on one server never drop each other's live stand-in."""
+    name = make_url(test_url).database or "firebreak_test"
+    return f"{name.removesuffix('_test')}_live_test"
 
 
 @pytest.fixture
 async def live_sessions(migrated_url: str) -> AsyncIterator[SessionFactory]:
     """A second database standing in for the live dev DB (record mode reads it, read-only)."""
     base = make_url(migrated_url)
-    live_url = base.set(database=LIVE_DB).render_as_string(hide_password=False)
+    live_db = live_db_name(migrated_url)
+    live_url = base.set(database=live_db).render_as_string(hide_password=False)
     admin = create_async_engine(
         base.set(database="postgres"), isolation_level="AUTOCOMMIT", poolclass=NullPool
     )
     async with admin.connect() as conn:
-        await conn.execute(text(f"DROP DATABASE IF EXISTS {LIVE_DB} WITH (FORCE)"))
+        await conn.execute(text(f"DROP DATABASE IF EXISTS {live_db} WITH (FORCE)"))
     await ensure_eval_database(live_url)  # create + migrate (the name ends _test)
     eng = create_async_engine(live_url, poolclass=NullPool)
     try:
@@ -130,7 +135,7 @@ async def live_sessions(migrated_url: str) -> AsyncIterator[SessionFactory]:
     finally:
         await eng.dispose()
         async with admin.connect() as conn:
-            await conn.execute(text(f"DROP DATABASE IF EXISTS {LIVE_DB} WITH (FORCE)"))
+            await conn.execute(text(f"DROP DATABASE IF EXISTS {live_db} WITH (FORCE)"))
         await admin.dispose()
 
 
@@ -461,7 +466,7 @@ async def test_current_database_mismatch_is_refused_before_any_write(
             )
     finally:
         await eng.dispose()
-    assert await require_eval_session(live_sessions) == LIVE_DB
+    assert await require_eval_session(live_sessions) == live_db_name(migrated_url)
 
 
 @pytest.mark.db
