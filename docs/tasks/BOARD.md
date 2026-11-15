@@ -46,8 +46,8 @@
 | T-064 | `IncidentWorkflow` skeleton + worker (M5; §8 two-builder comparison) | core | sonnet | contracts v1.6 | merged | #86 |
 | T-065 | Multi-agent roster (local profile) + `run_agent` activity (M5) | agents | sonnet | contracts v1.6 | merged | #82 |
 | T-066 | Ingest starts/signals `IncidentWorkflow` (grouping window timer) | core | sonnet | T-064, contracts v1.7 | merged | #89 |
-| T-067 | `multi-local` eval path: record/replay through the workflow | evals | **opus** (high risk) | T-044, T-064, T-065 | in-progress | |
-| T-068 | Workflow hardening: unknown agents, local-model timeouts, LLM-down backoff | core | sonnet | T-066, contracts v1.8 | ready | |
+| T-067 | `multi-local` eval path: record/replay through the workflow | evals | **opus** (high risk) | T-044, T-064, T-065 | merged | #90 |
+| T-068 | Workflow hardening: unknown agents, local-model timeouts, LLM-down backoff | core | sonnet | T-066, contracts v1.8 | merged | #94 |
 | T-049 | Local baseline run (`baseline-local`, $0) for CP1: S1–S6 recorded; S7 after T-053 | evals | lead | T-047, T-016, T-050, T-051, T-054, T-055, T-056, T-057 | in-progress (lead) | |
 
 ```
