@@ -27,6 +27,9 @@ Repo: https://github.com/HenryWinNguyen/firebreak (public).
   **Result: miss (top-1 and top-3), where the single-agent baseline hit.** The cause is visible in the recording: the
   supervisor planned `metrics`, `logs` and the *tool* `service_graph` again (dropped by T-068, despite the prompt
   fix) and never planned `deploys`, so no agent looked at the deploy.
+  Second weakness: the metrics specialist queried `sum(x)/sum(x)` (always 1), then reported `prometheus` as an
+  unavailable source although both queries returned data. `degraded_sources` is correctly empty: no specialist failed.
+  The model's claim was wrong, and nothing checks such claims against the tool log.
   Takeaway: with a small local model, the supervisor's plan is the weak link; better specialists don't help if
   the right one is never asked.
 - Open: an empty `question` is allowed in `SpecialistTask` (a reviewer-found path to a guaranteed failure).
