@@ -33,6 +33,7 @@ with workflow.unsafe.imports_passed_through():
         ACTIVITY_SET_INCIDENT_STATE,
         AGENT_TASK_QUEUE,
         SIGNAL_ALERT_ADDED,
+        SPECIALIST_AGENTS,
         AgentTask,
         AlertAdded,
         IncidentContext,
@@ -47,11 +48,18 @@ with workflow.unsafe.imports_passed_through():
 
 MAX_ATTEMPTS = 3
 DB_TIMEOUT = timedelta(seconds=30)
-TRIAGE_TIMEOUT = timedelta(seconds=300)
-SUPERVISOR_TIMEOUT = timedelta(seconds=300)
-SYNTHESIZER_TIMEOUT = timedelta(seconds=600)
+# Sized for one local model serving requests serially (first live run, 2026-11-14). The
+# timeout is per attempt, so the worst case is MAX_ATTEMPTS * timeout plus the backoff.
+TRIAGE_TIMEOUT = timedelta(seconds=900)
+SUPERVISOR_TIMEOUT = timedelta(seconds=1200)
+SYNTHESIZER_TIMEOUT = timedelta(seconds=1800)
 #: ``ApplicationError(non_retryable=True)`` from an activity is never retried by Temporal.
-RETRY = RetryPolicy(maximum_attempts=MAX_ATTEMPTS)
+#: Attempts start at 0 s, 10 s and 30 s, which rides out an LLM server restart.
+RETRY = RetryPolicy(
+    maximum_attempts=MAX_ATTEMPTS,
+    initial_interval=timedelta(seconds=10),
+    backoff_coefficient=2.0,
+)
 
 WORKFLOW_ID_PREFIX = "incident-"
 
@@ -77,6 +85,7 @@ class IncidentWorkflow:
     def __init__(self) -> None:
         self._runs: list[AgentRunResult] = []
         self._usage = Usage()
+        self._dropped: list[str] = []
         # Signal-with-start delivers ``alert_added`` before ``run`` starts, so this state must
         # exist after ``__init__``.
         self._critical_seen = False
@@ -145,6 +154,21 @@ class IncidentWorkflow:
             plan = await self._step("supervisor", ctx, Plan, limit=SUPERVISOR_TIMEOUT)
         except _Invalid as e:
             return await self._finish(incident_id, IncidentState.ESCALATED, ctx, error=str(e))
+        # Drop tasks naming anything but a specialist (a model once planned a tool as an agent).
+        kept = [t for t in plan.tasks if t.agent in SPECIALIST_AGENTS]
+        self._dropped = [t.agent for t in plan.tasks if t.agent not in SPECIALIST_AGENTS]
+        for name in self._dropped:
+            workflow.logger.warning(
+                "incident %s: plan task for unknown specialist %r dropped", incident_id, name
+            )
+        if not kept:
+            return await self._finish(
+                incident_id,
+                IncidentState.ESCALATED,
+                ctx.model_copy(update={"plan": plan}),
+                error=f"plan named no known specialist: {', '.join(self._dropped)}",
+            )
+        plan = plan.model_copy(update={"tasks": kept})
         ctx = ctx.model_copy(update={"plan": plan})
 
         # INVESTIGATING
@@ -196,6 +220,7 @@ class IncidentWorkflow:
             final_state=state,
             report=report,
             degraded_sources=list(ctx.degraded_sources),
+            dropped_tasks=list(self._dropped),
             agent_runs=list(self._runs),
             usage=self._usage,
             error=error,
