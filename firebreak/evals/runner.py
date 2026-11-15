@@ -41,7 +41,7 @@ from sqlalchemy.pool import NullPool
 from temporalio.client import WorkflowFailureError
 
 import firebreak.db
-from firebreak.activities.agents import AgentActivities
+from firebreak.activities.agents import NON_SPECIALISTS, AgentActivities
 from firebreak.activities.incident import IncidentActivities
 from firebreak.agents.baseline import BaselineResult, investigate
 from firebreak.agents.config import CONFIGS_DIR
@@ -69,6 +69,7 @@ from firebreak.evals.cassette import (
 from firebreak.evals.grader import grade
 from firebreak.evals.multi import (
     MultiRecordError,
+    MultiReplayError,
     MultiRun,
     UnsetLLM,
     record_multi,
@@ -83,7 +84,7 @@ from firebreak.models.agents import AgentConfig
 from firebreak.models.alert import Alert
 from firebreak.models.common import new_id, utcnow
 from firebreak.models.evidence import EvidenceKind
-from firebreak.models.incident import Incident
+from firebreak.models.incident import Incident, IncidentState
 from firebreak.models.llm import LLMClient
 from firebreak.models.orchestration import WorkflowOutcome
 from firebreak.models.reasoning import InvestigationReport
@@ -225,6 +226,10 @@ class RecordedRunInfo(BaseModel):
     incident: Incident
     alerts: list[Alert]
     latency_s: float
+    #: Workflow runs only (profile agents); None for the baseline. Replay checks them.
+    final_state: IncidentState | None = None
+    degraded_sources: list[str] | None = None
+    outcome_error: str | None = None
 
 
 @dataclass
@@ -542,7 +547,14 @@ async def record_scenario(
         _write_run_file(
             scenario,
             directory,
-            RecordedRunInfo(incident=incident, alerts=alerts, latency_s=latency_s),
+            RecordedRunInfo(
+                incident=incident,
+                alerts=alerts,
+                latency_s=latency_s,
+                final_state=outcome.final_state,
+                degraded_sources=list(outcome.degraded_sources),
+                outcome_error=outcome.error,
+            ),
         )
         kinds = await EvalRepository(sessions).evidence_kinds(incident_id)
         return ScenarioOutcome(scenario.id, _outcome_result(scenario, outcome, kinds, latency_s))
@@ -635,6 +647,37 @@ async def _workflow(
         ) from exc
 
 
+def _check_outcome(
+    key: str, outcome: WorkflowOutcome, info: RecordedRunInfo, run: MultiRun
+) -> WorkflowOutcome:
+    """The replayed outcome must match the recorded one (state, degraded sources, error).
+
+    A non-specialist that failed while recording (e.g. a triage timeout) escalated the run with
+    Temporal's own error text, which an activity can't reproduce; replay re-raises the failure as
+    an ``ApplicationError``, so for those runs the recorded ``error`` is used.
+    """
+    if info.degraded_sources is None:
+        return outcome
+    if outcome.final_state != info.final_state or outcome.degraded_sources != (
+        info.degraded_sources
+    ):
+        raise StaleRecordingError(
+            scenario=key,
+            step="workflow outcome",
+            detail=f"replay ended {outcome.final_state} with degraded {outcome.degraded_sources}; "
+            f"the recording ended {info.final_state} with degraded {info.degraded_sources}",
+        )
+    if any(f.agent in NON_SPECIALISTS for f in run.failed_calls.values()):
+        return outcome.model_copy(update={"error": info.outcome_error})
+    if outcome.error != info.outcome_error:
+        raise StaleRecordingError(
+            scenario=key,
+            step="workflow outcome",
+            detail=f"replay error {outcome.error!r}, recorded {info.outcome_error!r}",
+        )
+    return outcome
+
+
 async def replay_multi_scenario(
     scenario: Scenario,
     *,
@@ -654,8 +697,14 @@ async def replay_multi_scenario(
     repo = EvalRepository(sessions)
     await _install_incident(repo, sessions, _for_workflow(info))
     base = _multi_activities(agent, sessions, tools_settings)
-    with replay_multi(directory, base=base) as run:
-        outcome, _ = await _workflow(scenario, info.incident.id, run, sessions, time_skipping=True)
+    try:
+        with replay_multi(directory, base=base) as run:
+            outcome, _ = await _workflow(
+                scenario, info.incident.id, run, sessions, time_skipping=True
+            )
+    except MultiReplayError as exc:
+        raise EvalRunError(str(exc)) from exc
+    outcome = _check_outcome(key, outcome, info, run)
     prompt_sha = run.meta.prompt_sha256 if run.meta is not None else None
     kinds = await repo.evidence_kinds(info.incident.id)
     # Replay speed says nothing about the agents; report the recorded live latency.
