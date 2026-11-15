@@ -229,6 +229,7 @@ class RecordedRunInfo(BaseModel):
     #: Workflow runs only (profile agents); None for the baseline. Replay checks them.
     final_state: IncidentState | None = None
     degraded_sources: list[str] | None = None
+    dropped_tasks: list[str] | None = None
     outcome_error: str | None = None
 
 
@@ -553,6 +554,7 @@ async def record_scenario(
                 latency_s=latency_s,
                 final_state=outcome.final_state,
                 degraded_sources=list(outcome.degraded_sources),
+                dropped_tasks=list(outcome.dropped_tasks),
                 outcome_error=outcome.error,
             ),
         )
@@ -650,7 +652,7 @@ async def _workflow(
 def _check_outcome(
     key: str, outcome: WorkflowOutcome, info: RecordedRunInfo, run: MultiRun
 ) -> WorkflowOutcome:
-    """The replayed outcome must match the recorded one (state, degraded sources, error).
+    """The replayed outcome must match the recorded one (state, degraded, dropped, error).
 
     A non-specialist that failed while recording (e.g. a triage timeout) escalated the run with
     Temporal's own error text, which an activity can't reproduce; replay re-raises the failure as
@@ -658,14 +660,14 @@ def _check_outcome(
     """
     if info.degraded_sources is None:
         return outcome
-    if outcome.final_state != info.final_state or outcome.degraded_sources != (
-        info.degraded_sources
-    ):
+    replayed = (outcome.final_state, outcome.degraded_sources, outcome.dropped_tasks)
+    recorded = (info.final_state, info.degraded_sources, info.dropped_tasks or [])
+    if replayed != recorded:
         raise StaleRecordingError(
             scenario=key,
             step="workflow outcome",
-            detail=f"replay ended {outcome.final_state} with degraded {outcome.degraded_sources}; "
-            f"the recording ended {info.final_state} with degraded {info.degraded_sources}",
+            detail=f"replay ended (state, degraded, dropped) = {replayed}; the recording ended "
+            f"{recorded}",
         )
     if any(f.agent in NON_SPECIALISTS for f in run.failed_calls.values()):
         return outcome.model_copy(update={"error": info.outcome_error})

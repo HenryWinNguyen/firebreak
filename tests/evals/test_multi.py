@@ -786,3 +786,31 @@ async def test_replay_retry_reuses_the_call_key_and_ids(tmp_path: Path) -> None:
     assert "database blip" in rp._last_error[deploys]  # attempt 1 really failed
     assert sorted(rp_sink.stored) == sorted(rec_sink.stored)
     assert no_timing(replayed) == no_timing(recorded)
+
+
+async def test_dropped_plan_tasks_are_recorded_and_checked(tmp_path: Path) -> None:
+    """v1.8: a plan task naming no known specialist is dropped; replay must drop the same."""
+    plan = [*PLAN, ("traces", "any slow spans?")]
+    recorded, _, _ = await record(tmp_path, plan=plan)
+    assert recorded.dropped_tasks and recorded.final_state is IncidentState.REPORT_ONLY
+    replayed, rp, _ = await replay(tmp_path)
+    assert no_timing(replayed) == no_timing(recorded)
+    info = runner.RecordedRunInfo(
+        incident=Incident(
+            id=INCIDENT,
+            severity=Severity.CRITICAL,
+            cluster="checkout",
+            services=["orders"],
+            alert_ids=[],
+            window_closes_at=AT,
+        ),
+        alerts=[],
+        latency_s=1.0,
+        final_state=recorded.final_state,
+        degraded_sources=recorded.degraded_sources,
+        dropped_tasks=recorded.dropped_tasks,
+        outcome_error=recorded.error,
+    )
+    assert runner._check_outcome(SCENARIO, replayed, info, rp) == replayed
+    with pytest.raises(StaleRecordingError, match="dropped"):
+        runner._check_outcome(SCENARIO, replayed, info.model_copy(update={"dropped_tasks": []}), rp)
