@@ -16,9 +16,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 from temporalio import activity
 
+import firebreak.activities.agents as agents
 import firebreak.agents.runtime as runtime
 import firebreak.evals.multi as multi
 from firebreak.activities.agents import AgentActivities
+from firebreak.agents.config import AgentConfigError
 from firebreak.agents.settings import AgentSettings
 from firebreak.db.repositories import SessionFactory
 from firebreak.evals import runner
@@ -890,3 +892,50 @@ def test_record_consistency_check_refuses_unreplayable_recordings(tmp_path: Path
     )
     run.check_record(outcome)  # metrics "completed" but the workflow never saw its run
     assert run.problems and "could not replay" in run.problems[0]
+
+
+async def test_failed_call_that_fails_differently_is_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recorded: metrics fails at its LLM. Replay: it fails earlier, for another reason (a broken
+    config), and the workflow would degrade the same way. That is drift, not the recorded failure.
+    """
+    recorded, _, _ = await record(tmp_path, llm=FakeMultiLLM(PLAN, fail={"metrics": 99}))
+    assert recorded.degraded_sources == ["metrics"]
+    original = agents.load_agent_config
+
+    def broken(path: Path, registry: Any) -> Any:
+        if path.stem == "metrics":
+            raise AgentConfigError("metrics.yaml: someone broke it")
+        return original(path, registry)
+
+    monkeypatch.setattr(agents, "load_agent_config", broken)
+    with pytest.raises(StaleRecordingError, match=r"s01/metrics-.*failed differently in replay"):
+        await replay(tmp_path)
+
+
+async def test_failure_before_the_first_llm_request_is_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Recorded: metrics fails before any LLM request (empty question). Replay still runs it: a
+    code change that lets it reach the model is drift."""
+    plan = [("metrics", ""), PLAN[1]]
+    recorded, _, _ = await record(tmp_path, plan=plan, llm=FakeMultiLLM(plan))
+    key = call_key("metrics", "", 0)
+    failed = FailedCall.model_validate_json(
+        (directory_for(tmp_path) / CALLS_DIR / key / FAILED_FILE).read_text()
+    )
+    assert recorded.degraded_sources == ["metrics"] and failed.llm_steps == []
+    replayed, _, _ = await replay(tmp_path)  # unchanged code: the same failure replays
+    assert no_timing(replayed) == no_timing(recorded)
+
+    original = agents.build_agent_task_text
+
+    def fixed(task: Any) -> str:
+        if task.agent not in agents.NON_SPECIALISTS and not task.question:
+            task = task.model_copy(update={"question": "(no question)"})
+        return original(task)
+
+    monkeypatch.setattr(agents, "build_agent_task_text", fixed)
+    with pytest.raises(StaleRecordingError, match=r"failed before its first LLM request"):
+        await replay(tmp_path)

@@ -43,11 +43,14 @@ Design (how record and replay stay identical with parallel specialists):
   LLM request (``first_request.json``, its fixture key in ``FailedCall.llm_steps``). Replay runs
   the agent up to that first request, checks it against the recording (prompt, tool schemas,
   model and task: a difference is ``StaleRecordingError`` naming the call), then raises the
-  recorded failure as a non-retryable ``ApplicationError``. The workflow degrades (or escalates)
-  exactly as it did live: same ``degraded_sources``, same synthesizer prompt, same report. The
-  scenario ``prompt_sha256`` covers these first requests too. Temporal's own error text for a
-  timed-out non-specialist can't be reproduced from an activity, so the runner stores the
-  recorded outcome's ``error`` in ``run.json`` and uses it when the same agent escalated.
+  recorded failure as a non-retryable ``ApplicationError``. The call must end with exactly that
+  failure (or, if it failed before any LLM request, an error of the recorded type raised before
+  one); any other error or a result is drift. Only the first LLM request is checked, so drift
+  that would show only from step 2 on isn't detected for failed calls. The workflow degrades (or
+  escalates) exactly as it did live: same ``degraded_sources``, same synthesizer prompt, same
+  report. The scenario ``prompt_sha256`` covers these first requests too. Temporal's own error
+  text for a timed-out non-specialist can't be reproduced from an activity, so the runner stores
+  the recorded outcome's ``error`` in ``run.json`` and uses it when the same agent escalated.
 - **Consistency.** After a recorded workflow, the completed calls per agent must equal the
   workflow's ``agent_runs`` per agent, and every degraded agent must have a failed or completed
   call; otherwise the recording could not replay and is refused.
@@ -242,6 +245,23 @@ def _stale_in(exc: BaseException) -> StaleRecordingError | None:
     return None
 
 
+def _in_chain(exc: BaseException, target: BaseException) -> bool:
+    """Whether ``target`` is ``exc`` or behind it (causes, contexts, exception groups)."""
+    seen: set[int] = set()
+    todo: list[BaseException] = [exc]
+    while todo:
+        cur = todo.pop()
+        if id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if cur is target:
+            return True
+        if isinstance(cur, BaseExceptionGroup):
+            todo.extend(cur.exceptions)
+        todo.extend(e for e in (cur.__cause__, cur.__context__) if e is not None)
+    return False
+
+
 def _remaining_s(info: activity.Info, margin_s: float) -> float | None:
     """Seconds until ``margin_s`` before this attempt's start_to_close (None: no timeout)."""
     limit = info.start_to_close_timeout
@@ -270,10 +290,13 @@ class _FailedCallLLM:
     (prompt, tools, model, task), then the recorded failure is raised where the recording ends.
     """
 
-    def __init__(self, failed: FailedCall, recorded: LLMRequest, scenario: str) -> None:
+    def __init__(self, failed: FailedCall, recorded: LLMRequest | None, scenario: str) -> None:
         self._failed = failed
         self._recorded = recorded
         self._scenario = scenario
+        self.called = False
+        #: The recorded failure this stub raised (only that exact error ends the call cleanly).
+        self.raised: ApplicationError | None = None
 
     def failure(self) -> ApplicationError:
         f = self._failed
@@ -285,6 +308,22 @@ class _FailedCallLLM:
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         key = fixture_key(request)
+        if self.called:  # the recorded failure was raised at step 1; nothing comes after it
+            raise StaleRecordingError(
+                scenario=self._scenario,
+                step="llm step 2",
+                detail="the call failed at step 1 while recording; replay went on",
+                key=key,
+            )
+        self.called = True
+        if self._recorded is None or not self._failed.llm_steps:
+            raise StaleRecordingError(
+                scenario=self._scenario,
+                step="llm step 1",
+                detail="the call failed before its first LLM request while recording; replay "
+                "made one",
+                key=key,
+            )
         if key != self._failed.llm_steps[0]:
             raise StaleRecordingError(
                 scenario=self._scenario,
@@ -293,7 +332,8 @@ class _FailedCallLLM:
                 + " (this call failed while recording)",
                 key=key,
             )
-        raise self.failure()
+        self.raised = self.failure()
+        raise self.raised
 
 
 def _describe(e: BaseException) -> tuple[str, str]:
@@ -657,40 +697,51 @@ class MultiRun:
         return result
 
     async def _replay_failed(self, key: str, task: AgentTask, failed: FailedCall) -> NoReturn:
-        """Run the agent up to its first LLM request, check it, raise the recorded failure."""
-        if key not in self.replayed_failures:
-            self.replayed_failures.append(key)
+        """Run the agent against the recorded first request; the call must end with exactly the
+        recorded failure, anything else is drift.
+
+        With a recorded step 1, only the failure ``_FailedCallLLM`` raises after a matching step 1
+        counts. With none (it failed before any LLM request), only an error of the recorded type
+        raised before any LLM request counts. A returned result is drift too.
+        """
+        scenario = f"{self.scenario}/{key}"
         directory = self.directory / CALLS_DIR / key
-        recorded = self._first_requests.get(key)
-        if not failed.llm_steps or recorded is None:
-            # It failed before its first LLM request: there is nothing to compare.
-            raise ApplicationError(
-                f"recorded failure after {failed.attempts} attempt(s): {failed.message}",
-                type=failed.error_type,
-                non_retryable=True,
-            )
-        llm = _FailedCallLLM(failed, recorded, f"{self.scenario}/{key}")
+        recorded = self._first_requests.get(key) if failed.llm_steps else None
+        llm = _FailedCallLLM(failed, recorded, scenario)
         # No tool results exist for a failed call: any tool call is drift.
         adapters = Cassette(
-            CassetteMode.REPLAY, directory, scenario=f"{self.scenario}/{key}", graph=self._graph
+            CassetteMode.REPLAY, directory, scenario=scenario, graph=self._graph
         ).adapters
         try:
-            with deterministic(f"{self.scenario}/{key}#failed@{self.at.isoformat()}", at=self.at):
+            with deterministic(f"{scenario}#failed@{self.at.isoformat()}", at=self.at):
                 await self._inner(llm, adapters).run_agent(task)
-        except ApplicationError as e:
-            if e.type == failed.error_type and _stale_in(e) is None:
-                raise
-            found = _stale_in(e)
-            if found is not None:
-                self._drift(found, e, key)
+        except asyncio.CancelledError:
+            self._last_error[key] = "cancelled"
             raise
         except Exception as e:
             found = _stale_in(e)
             if found is not None:
                 self._drift(found, e, key)
-            raise
+            if llm.raised is not None and _in_chain(e, llm.raised):
+                accepted = True
+            elif recorded is None and not llm.called:
+                accepted = _describe(e)[0] == failed.error_type
+            else:
+                accepted = False
+            if not accepted:
+                error_type, message = _describe(e)
+                stale = StaleRecordingError(
+                    scenario=scenario,
+                    step="end of call",
+                    detail=f"failed differently in replay: {error_type}: {message} (recorded: "
+                    f"{failed.error_type}: {failed.message})",
+                )
+                self._drift(stale, e, key)
+            if key not in self.replayed_failures:
+                self.replayed_failures.append(key)
+            raise llm.failure() from e
         stale = StaleRecordingError(
-            scenario=f"{self.scenario}/{key}",
+            scenario=scenario,
             step="end of call",
             detail="the call failed while recording but returned a result in replay",
         )
