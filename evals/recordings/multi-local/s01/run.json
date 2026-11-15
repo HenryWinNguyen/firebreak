@@ -1,0 +1,45 @@
+{
+  "format_version": 1,
+  "incident": {
+    "id": "inc_2504d318a5ca49279c3c0923f509ffdf",
+    "state": "grouping",
+    "severity": "critical",
+    "cluster": "shopfloor",
+    "services": [
+      "orders"
+    ],
+    "alert_ids": [
+      "al_41fb0a46b37a43febc6e1f305af7cff3"
+    ],
+    "opened_at": "2026-11-15T22:18:52.189177Z",
+    "window_closes_at": "2026-11-15T22:18:52.189177Z",
+    "updated_at": "2026-11-15T22:18:52.189177Z"
+  },
+  "alerts": [
+    {
+      "id": "al_41fb0a46b37a43febc6e1f305af7cff3",
+      "source": "alertmanager",
+      "fingerprint": "40516ae3fbf09d96",
+      "alertname": "HighErrorRate",
+      "service": "orders",
+      "severity": "critical",
+      "status": "firing",
+      "summary": "orders 5xx ratio is 8.472% (> 5%)",
+      "labels": {
+        "env": "demo",
+        "service": "orders",
+        "severity": "critical",
+        "alertname": "HighErrorRate"
+      },
+      "started_at": "2026-11-15T22:18:37.383000Z",
+      "ended_at": null
+    }
+  ],
+  "latency_s": 402.2254307498224,
+  "final_state": "report_only",
+  "degraded_sources": [],
+  "dropped_tasks": [
+    "service_graph"
+  ],
+  "outcome_error": null
+}

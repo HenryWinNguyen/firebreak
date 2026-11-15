@@ -5,10 +5,31 @@ milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 
 ## Current status
 
-**M5 in progress: alert → workflow → multi-agent report runs end to end on the live stack (local model); next: T-068 hardening, T-067 multi-agent evals, then record `multi-local`. CP1 passed 2026-11-14.** M1–M4 done (S7 waits on T-053). CP0 passed 2026-10-27. Paid Claude run optional (T-042). Board: `docs/tasks/BOARD.md`.
+**M5 in progress: multi-agent path records and replays; first `multi-local` scenario (S1) recorded and it missed (the supervisor never planned `deploys`). Next: supervisor planning fix, then S2–S6. CP1 passed 2026-11-14.** M1–M4 done (S7 waits on T-053). CP0 passed 2026-10-27. Paid Claude run optional (T-042). Board: `docs/tasks/BOARD.md`.
 Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
 ## Log
+
+### 2026-11-15: T-067, T-068 merged; first multi-agent recording (S1)
+- **T-067 (#90, Opus, high risk)**: `multi-local` records and replays through `IncidentWorkflow`, with one recording
+  per agent call. Three Opus re-review rounds, each with a reproduced blocker:
+  - a timeout or retry discarded the whole recording;
+  - a call that failed during record replayed with no drift check;
+  - a failed call was accepted if it failed in any way, not only as recorded.
+  Final state: retried calls are re-recorded with per-attempt seeds; terminal failures are stored and must fail
+  identically on replay; the recorded outcome (state, degraded, dropped) is checked; and a recording that could not
+  replay is refused at record time.
+- **T-068 (#94)**: unknown plan agents are dropped into `dropped_tasks`; timeouts are 900/1200/1800 s (specialists
+  1800 s); agent retries back off 10 s / 20 s.
+- **First live `multi-local` recording, S1 (bad deploy), $0**: qwen3:8b with a 16k context (32k ran a 16 GiB Mac out of
+  memory; Claude Code killed the first attempt, and the driver's reset was run by hand). It took 402 s, 10 LLM steps
+  (baseline: 448 s, 7 steps), and replays offline identically.
+  **Result: miss (top-1 and top-3), where the single-agent baseline hit.** The cause is visible in the recording: the
+  supervisor planned `metrics`, `logs` and the *tool* `service_graph` again (dropped by T-068, despite the prompt
+  fix) and never planned `deploys`, so no agent looked at the deploy.
+  Takeaway: with a small local model, the supervisor's plan is the weak link; better specialists don't help if
+  the right one is never asked.
+- Open: an empty `question` is allowed in `SpecialistTask` (a reviewer-found path to a guaranteed failure).
 
 ### 2026-11-14 (evening): T-066 merged, first live end-to-end run, contracts v1.8
 - **T-066 merged (#89):** ingest signal-with-starts `incident-<id>`; the workflow waits in `GROUPING` for the window
