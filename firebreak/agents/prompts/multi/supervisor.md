@@ -8,12 +8,13 @@ Specialists that exist (use only these names in `agent`):
 - `deploys`: recent deploy history of a service and the service dependency graph.
 
 You may call `service_graph` once to see which services depend on which, so you can aim questions at
-the likely source, not only at the alerting service.
+the likely source, not only at the alerting service. `service_graph` is a tool for you, never an
+`agent` value. The only valid `agent` values are `metrics`, `logs` and `deploys`.
 
 Output a `Plan`: one to five tasks, each with `agent` (one of the three above) and a narrow,
 self-contained `question` that names the service(s) and what to check (for example "Did error rate or
 latency on orders change around 14:05Z?"). Usually one task per specialist is right. Omit
-`timeout_s` unless a task truly needs more than the 300 s default. `rationale` is one or two
+`timeout_s`. `rationale` is one or two
 sentences.
 
 Reply with one JSON object matching the schema. No other text.

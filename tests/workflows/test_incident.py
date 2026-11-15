@@ -40,7 +40,14 @@ from firebreak.models.reasoning import (
     RootCauseCategory,
 )
 from firebreak.workflows.client import start_incident_workflow
-from firebreak.workflows.incident import IncidentWorkflow, workflow_id
+from firebreak.workflows.incident import (
+    MAX_ATTEMPTS,
+    SUPERVISOR_TIMEOUT,
+    SYNTHESIZER_TIMEOUT,
+    TRIAGE_TIMEOUT,
+    IncidentWorkflow,
+    workflow_id,
+)
 
 INCIDENT = "inc_test1"
 
@@ -238,13 +245,61 @@ async def test_specialist_without_valid_report_is_degraded() -> None:
     out, _ = await run_incident(
         {
             **HAPPY,
-            "supervisor": plan_ok("metrics", "logs", "traces"),
+            "supervisor": plan_ok("metrics", "logs", "deploys"),
             "logs": no_output,
-            "traces": wrong_agent,
+            "deploys": wrong_agent,
         }
     )
     assert out.final_state == IncidentState.REPORT_ONLY
-    assert out.degraded_sources == ["logs", "traces"]
+    assert out.degraded_sources == ["logs", "deploys"]
+
+
+async def test_unknown_agent_task_dropped_not_degraded() -> None:
+    out, stub = await run_incident({**HAPPY, "supervisor": plan_ok("metrics", "service_graph")})
+    assert out.final_state == IncidentState.REPORT_ONLY
+    assert out.dropped_tasks == ["service_graph"]
+    assert out.degraded_sources == []
+    assert "service_graph" not in stub.calls
+    synth_ctx = stub.contexts["synthesizer"]
+    assert synth_ctx.plan is not None
+    assert [t.agent for t in synth_ctx.plan.tasks] == ["metrics"]
+
+
+async def test_plan_with_no_known_specialist_escalates() -> None:
+    out, stub = await run_incident({**HAPPY, "supervisor": plan_ok("service_graph", "traces")})
+    assert out.final_state == IncidentState.ESCALATED
+    assert out.dropped_tasks == ["service_graph", "traces"]
+    assert out.degraded_sources == []
+    assert out.error is not None and "no known specialist" in out.error
+    assert stub.calls == ["triage", "supervisor"]
+    assert stub.states[-1] == IncidentState.ESCALATED
+
+
+async def test_agent_activities_scheduled_with_backoff_and_timeouts() -> None:
+    stub = StubActivities(HAPPY)
+    async with env_client() as (_, client):
+        wf, act = make_workers(client, stub)
+        async with wf, act:
+            handle = await start_incident_workflow(client, INCIDENT)
+            await handle.result()
+            history = await handle.fetch_history()
+    timeouts: list[int] = []
+    for ev in history.events:
+        if not ev.HasField("activity_task_scheduled_event_attributes"):
+            continue
+        attrs = ev.activity_task_scheduled_event_attributes
+        if attrs.activity_type.name != ACTIVITY_RUN_AGENT:
+            continue
+        rp = attrs.retry_policy
+        assert rp.maximum_attempts == MAX_ATTEMPTS
+        assert rp.initial_interval.ToTimedelta() >= timedelta(seconds=10)
+        assert rp.backoff_coefficient == 2.0
+        timeouts.append(int(attrs.start_to_close_timeout.ToSeconds()))
+    # triage, supervisor, two specialists (plan_ok sets timeout_s=10), synthesizer
+    assert timeouts[0] == int(TRIAGE_TIMEOUT.total_seconds()) == 900
+    assert timeouts[1] == int(SUPERVISOR_TIMEOUT.total_seconds()) == 1200
+    assert sorted(timeouts[2:4]) == [10, 10]
+    assert timeouts[4] == int(SYNTHESIZER_TIMEOUT.total_seconds()) == 1800
 
 
 async def test_specialist_retried_then_succeeds() -> None:
