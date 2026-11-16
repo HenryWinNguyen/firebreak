@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "agent": "multi-local",
+  "scenario": "s05/supervisor-0",
+  "seed": "s05/supervisor-0@2026-11-16T06:41:40.414074+00:00",
+  "at": "2026-11-16T06:41:40.414074Z",
+  "models": [
+    "qwen3:8b"
+  ],
+  "prompt_sha256": "0b80eaaee1c01b556174a549ade6d60afac03e3f672beda6b2344094fdfdaf99",
+  "llm_steps": [
+    "9afbfeac42c1e1566293c6e9a7517a15a15296158ab46916aad2562080caa9b8"
+  ],
+  "tool_calls": 0,
+  "recorded_on": "2026-11-16"
+}
