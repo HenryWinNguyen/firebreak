@@ -1,0 +1,47 @@
+{
+  "format_version": 1,
+  "incident": {
+    "id": "inc_2c852a0a8d9b47f087da1c9ad2de7abb",
+    "state": "grouping",
+    "severity": "warning",
+    "cluster": "shopfloor",
+    "services": [
+      "orders"
+    ],
+    "alert_ids": [
+      "al_ce27a5754bdb43e7879aeac0a781b3cc"
+    ],
+    "opened_at": "2026-11-16T06:41:37.188810Z",
+    "window_closes_at": "2026-11-16T06:42:37.188810Z",
+    "updated_at": "2026-11-16T06:41:37.188810Z"
+  },
+  "alerts": [
+    {
+      "id": "al_ce27a5754bdb43e7879aeac0a781b3cc",
+      "source": "alertmanager",
+      "fingerprint": "af67daef7a51cb64",
+      "alertname": "HighMemory",
+      "service": "orders",
+      "severity": "warning",
+      "status": "firing",
+      "summary": "orders RSS is 1.012GiB (> 400MB)",
+      "labels": {
+        "env": "demo",
+        "job": "orders",
+        "service": "orders",
+        "instance": "orders:8101",
+        "severity": "warning",
+        "alertname": "HighMemory"
+      },
+      "started_at": "2026-11-16T06:41:22.383000Z",
+      "ended_at": null
+    }
+  ],
+  "latency_s": 504.0886340830475,
+  "final_state": "report_only",
+  "degraded_sources": [
+    "logs"
+  ],
+  "dropped_tasks": [],
+  "outcome_error": null
+}

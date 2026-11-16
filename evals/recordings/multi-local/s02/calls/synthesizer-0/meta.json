@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "agent": "multi-local",
+  "scenario": "s02/synthesizer-0",
+  "seed": "s02/synthesizer-0@2026-11-16T05:53:56.248493+00:00",
+  "at": "2026-11-16T05:53:56.248493Z",
+  "models": [
+    "qwen3:8b"
+  ],
+  "prompt_sha256": "e63acc19284e47aed53292d99de96d9e257975c1d3b36fd7b69b0928c920894a",
+  "llm_steps": [
+    "65aa69e5c24076532e43930d4389dfe115999919634c843bdc3b23540500ba43"
+  ],
+  "tool_calls": 0,
+  "recorded_on": "2026-11-16"
+}

@@ -1,0 +1,19 @@
+{
+  "format_version": 1,
+  "agent": "multi-local",
+  "scenario": "s05/metrics-356a21aa-0",
+  "seed": "s05/metrics-356a21aa-0@2026-11-16T06:41:40.414074+00:00",
+  "at": "2026-11-16T06:41:40.414074Z",
+  "models": [
+    "qwen3:8b"
+  ],
+  "prompt_sha256": "f33c1e8b3678e0b9b0d2eafa977177464b3629ed4501cebf3fcda27760673707",
+  "llm_steps": [
+    "b8b935b481925a44b97741199134fea60672efa092da0dcaa02c94c91c817d31",
+    "6be7b1b80aaff254cb79a4d6dd14f9a86719a01c50402378da8b4a2a358615e0",
+    "5470ce71a41f87b10ebbac45bcc9289aa5723a64ad2e8d1ee3d9598b35049dc5",
+    "757e3e47abe2285821d83edf7690757908a7f29b1772a111b1faf4fedb40fe45"
+  ],
+  "tool_calls": 2,
+  "recorded_on": "2026-11-16"
+}

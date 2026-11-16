@@ -1,0 +1,1 @@
+{"seq":0,"method":"deploys.recent_deploys","args":{"service":"gateway","limit":5},"key":"0b1f6f49e979150aa1fc6b162b5f721ea48e12fc91e505e23ef0c8cce23293f6","result":[{"service":"gateway","version":"1.0.0","deployed_at":"2026-10-29T19:12:07.513816Z","message":"initial deploy"}]}

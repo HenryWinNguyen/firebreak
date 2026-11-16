@@ -1,0 +1,18 @@
+{
+  "format_version": 1,
+  "agent": "multi-local",
+  "scenario": "s05/logs-60f6821b-0",
+  "seed": "s05/logs-60f6821b-0@2026-11-16T06:41:40.414074+00:00",
+  "at": "2026-11-16T06:41:40.414074Z",
+  "models": [
+    "qwen3:8b"
+  ],
+  "prompt_sha256": "f0395f9a7c7152b678d6008d6dc1105a17ee6011881a1f419b7f9a977c8ad2d3",
+  "llm_steps": [
+    "00242068ef0e158923ca0dd900d328c1ce2aca2230df8ca1fab9f94ff43d32fb",
+    "1e8263b50101aca81c64261aa7f6e744c96a86ddde5e6e056158ed41eb100c5e",
+    "92ebbf1a891b4a8f48507f32819df480d718d270b4796adc794383cd0767c711"
+  ],
+  "tool_calls": 1,
+  "recorded_on": "2026-11-16"
+}

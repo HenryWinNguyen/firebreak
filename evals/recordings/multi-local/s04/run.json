@@ -1,0 +1,45 @@
+{
+  "format_version": 1,
+  "incident": {
+    "id": "inc_f797166ab15b4614a77a389a0cb58c4e",
+    "state": "grouping",
+    "severity": "critical",
+    "cluster": "shopfloor",
+    "services": [
+      "gateway"
+    ],
+    "alert_ids": [
+      "al_aa5dafb7c2a549289f4dfd06b99dfa23"
+    ],
+    "opened_at": "2026-11-16T06:25:52.171533Z",
+    "window_closes_at": "2026-11-16T06:25:52.171533Z",
+    "updated_at": "2026-11-16T06:25:52.171533Z"
+  },
+  "alerts": [
+    {
+      "id": "al_aa5dafb7c2a549289f4dfd06b99dfa23",
+      "source": "alertmanager",
+      "fingerprint": "5433cd32bf202087",
+      "alertname": "HighErrorRate",
+      "service": "gateway",
+      "severity": "critical",
+      "status": "firing",
+      "summary": "gateway 5xx ratio is 84.65% (> 5%)",
+      "labels": {
+        "env": "demo",
+        "service": "gateway",
+        "severity": "critical",
+        "alertname": "HighErrorRate"
+      },
+      "started_at": "2026-11-16T06:25:37.383000Z",
+      "ended_at": null
+    }
+  ],
+  "latency_s": 397.62079349998385,
+  "final_state": "report_only",
+  "degraded_sources": [
+    "logs"
+  ],
+  "dropped_tasks": [],
+  "outcome_error": null
+}
