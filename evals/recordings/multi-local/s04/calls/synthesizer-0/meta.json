@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "agent": "multi-local",
+  "scenario": "s04/synthesizer-0",
+  "seed": "s04/synthesizer-0@2026-11-16T06:25:52.960043+00:00",
+  "at": "2026-11-16T06:25:52.960043Z",
+  "models": [
+    "qwen3:8b"
+  ],
+  "prompt_sha256": "e63acc19284e47aed53292d99de96d9e257975c1d3b36fd7b69b0928c920894a",
+  "llm_steps": [
+    "e38c586cb44d89fd6e4ca288bb8139a7ca822391ae48b3ef990a718fee1eb767"
+  ],
+  "tool_calls": 0,
+  "recorded_on": "2026-11-16"
+}
