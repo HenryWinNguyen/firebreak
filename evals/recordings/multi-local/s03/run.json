@@ -1,0 +1,43 @@
+{
+  "format_version": 1,
+  "incident": {
+    "id": "inc_bcf08ec798744afca1ae1ac8a5f94b50",
+    "state": "grouping",
+    "severity": "warning",
+    "cluster": "shopfloor",
+    "services": [
+      "orders"
+    ],
+    "alert_ids": [
+      "al_532395ebb5d045958e777189bf92737b"
+    ],
+    "opened_at": "2026-11-16T06:11:37.250429Z",
+    "window_closes_at": "2026-11-16T06:12:37.250429Z",
+    "updated_at": "2026-11-16T06:11:37.250429Z"
+  },
+  "alerts": [
+    {
+      "id": "al_532395ebb5d045958e777189bf92737b",
+      "source": "alertmanager",
+      "fingerprint": "3672d1dd501fd3c3",
+      "alertname": "HighLatencyP95",
+      "service": "orders",
+      "severity": "warning",
+      "status": "firing",
+      "summary": "orders p95 latency is 4.379s (> 1s)",
+      "labels": {
+        "env": "demo",
+        "service": "orders",
+        "severity": "warning",
+        "alertname": "HighLatencyP95"
+      },
+      "started_at": "2026-11-16T06:11:22.383000Z",
+      "ended_at": null
+    }
+  ],
+  "latency_s": 374.3303373749368,
+  "final_state": "report_only",
+  "degraded_sources": [],
+  "dropped_tasks": [],
+  "outcome_error": null
+}

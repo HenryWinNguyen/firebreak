@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "agent": "multi-local",
+  "scenario": "s03/triage-0",
+  "seed": "s03/triage-0@2026-11-16T06:11:38.097885+00:00",
+  "at": "2026-11-16T06:11:38.097885Z",
+  "models": [
+    "qwen3:8b"
+  ],
+  "prompt_sha256": "f81e040570c60762b1eb8e3aa311a16203439b1e6ed06cbc23f58a1b86eff745",
+  "llm_steps": [
+    "6ee6af51971fac92dbfb490af33deefe76cbdb17e51af2730e8709ab199fca7c"
+  ],
+  "tool_calls": 0,
+  "recorded_on": "2026-11-16"
+}
