@@ -15,9 +15,10 @@ Repo: https://github.com/HenryWinNguyen/firebreak (public).
   `Literal["metrics", "logs", "deploys"]` and `question` must be non-empty, so a bad plan goes back to the model
   through the repair step (the v1.8 drop filter stays as a backstop). The supervisor prompt now asks for a `deploys`
   task unless triage rules a change out. `docs/tasks/T-069.md` was added so CI gate G2 could check the branch.
-- **S1 re-recorded: now a top-1 hit** (supervisor planned deploys and metrics; 540 s, 12 LLM steps).
+- **S1 re-recorded: now a top-1 hit** (the supervisor's first plan again named the tool `service_graph`; v1.9 sent it back through repair, and the
+  repaired plan was deploys and metrics; 540 s, 12 LLM steps).
 - **S2–S6 recorded live, $0** (qwen3:8b, 16k context, one scenario at a time). Each recording replays identically
-  and was scanned for secrets (pattern scan plus every `.env` value): no hits. No out-of-memory events.
+  and was scanned for secrets (pattern scan plus every `.env` value): no hits. The memory monitor (alert below 8% free) never fired.
 - **Result (`evals/REPORT.md`):**
 
   | | top-1 | top-3 | invalid reports | latency p50 |
@@ -34,7 +35,7 @@ Repo: https://github.com/HenryWinNguyen/firebreak (public).
   every prompt change means re-recording all six). Proposed follow-up: the synthesizer must only rank
   `bad_deploy` when a deploy precedes symptom onset and a finding links the two.
 - **Logs specialist is the weakest agent:** it wrote invalid LogQL (`{..} |= "ERROR" or {..}`, Loki 400) and
-  cited a made-up evidence id in S2, and returned findings without the `agent` field in S4 and S5. Each time it
+  cited a made-up evidence id in S2, and returned findings without the `agent` field in S4 and S5 (and once in S2, fixed by repair). Each time it
   became a degraded source; the workflow handled that as designed.
 
 ### 2026-11-15: T-067, T-068 merged; first multi-agent recording (S1)
