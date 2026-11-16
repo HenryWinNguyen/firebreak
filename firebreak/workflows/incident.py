@@ -154,7 +154,8 @@ class IncidentWorkflow:
             plan = await self._step("supervisor", ctx, Plan, limit=SUPERVISOR_TIMEOUT)
         except _Invalid as e:
             return await self._finish(incident_id, IncidentState.ESCALATED, ctx, error=str(e))
-        # Drop tasks naming anything but a specialist (a model once planned a tool as an agent).
+        # Backstop: since v1.9 the Plan schema already rejects non-specialists, so this only fires
+        # if SpecialistName and SPECIALIST_AGENTS drift apart.
         kept = [t for t in plan.tasks if t.agent in SPECIALIST_AGENTS]
         self._dropped = [t.agent for t in plan.tasks if t.agent not in SPECIALIST_AGENTS]
         for name in self._dropped:

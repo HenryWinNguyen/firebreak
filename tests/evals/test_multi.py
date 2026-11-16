@@ -801,10 +801,10 @@ async def test_replay_retry_reuses_the_call_key_and_ids(tmp_path: Path) -> None:
 
 
 async def test_dropped_plan_tasks_are_recorded_and_checked(tmp_path: Path) -> None:
-    """v1.8: a plan task naming no known specialist is dropped; replay must drop the same."""
-    plan = [*PLAN, ("traces", "any slow spans?")]
-    recorded, _, _ = await record(tmp_path, plan=plan)
-    assert recorded.dropped_tasks and recorded.final_state is IncidentState.REPORT_ONLY
+    """run.json's dropped_tasks is checked on replay. Since v1.9 a plan can't name a non-specialist
+    (the Plan schema rejects it), so the mismatch is exercised on a normal recording."""
+    recorded, _, _ = await record(tmp_path)
+    assert recorded.dropped_tasks == [] and recorded.final_state is IncidentState.REPORT_ONLY
     replayed, rp, _ = await replay(tmp_path)
     assert no_timing(replayed) == no_timing(recorded)
     info = runner.RecordedRunInfo(
@@ -824,8 +824,9 @@ async def test_dropped_plan_tasks_are_recorded_and_checked(tmp_path: Path) -> No
         outcome_error=recorded.error,
     )
     assert runner._check_outcome(SCENARIO, replayed, info, rp) == replayed
+    drifted = info.model_copy(update={"dropped_tasks": ["traces"]})
     with pytest.raises(StaleRecordingError, match="dropped"):
-        runner._check_outcome(SCENARIO, replayed, info.model_copy(update={"dropped_tasks": []}), rp)
+        runner._check_outcome(SCENARIO, replayed, drifted, rp)
 
 
 def metrics_prompt_changed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -917,11 +918,19 @@ async def test_failed_call_that_fails_differently_is_stale(
 async def test_failure_before_the_first_llm_request_is_checked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Recorded: metrics fails before any LLM request (empty question). Replay still runs it: a
-    code change that lets it reach the model is drift."""
-    plan = [("metrics", ""), PLAN[1]]
-    recorded, _, _ = await record(tmp_path, plan=plan, llm=FakeMultiLLM(plan))
-    key = call_key("metrics", "", 0)
+    """Recorded: metrics fails before any LLM request (a non-retryable error building its task).
+    Replay still runs it: a code change that lets it reach the model is drift. (v1.9 forbids the
+    empty question that used to trigger this, so the failure is injected.)"""
+    original = agents.build_agent_task_text
+
+    def broken(task: Any) -> str:
+        if task.agent == "metrics":
+            raise agents._non_retryable("specialist 'metrics' needs a question", "MissingQuestion")
+        return original(task)
+
+    monkeypatch.setattr(agents, "build_agent_task_text", broken)
+    recorded, _, _ = await record(tmp_path)
+    key = call_key("metrics", PLAN[0][1], 0)
     failed = FailedCall.model_validate_json(
         (directory_for(tmp_path) / CALLS_DIR / key / FAILED_FILE).read_text()
     )
@@ -929,13 +938,6 @@ async def test_failure_before_the_first_llm_request_is_checked(
     replayed, _, _ = await replay(tmp_path)  # unchanged code: the same failure replays
     assert no_timing(replayed) == no_timing(recorded)
 
-    original = agents.build_agent_task_text
-
-    def fixed(task: Any) -> str:
-        if task.agent not in agents.NON_SPECIALISTS and not task.question:
-            task = task.model_copy(update={"question": "(no question)"})
-        return original(task)
-
-    monkeypatch.setattr(agents, "build_agent_task_text", fixed)
+    monkeypatch.setattr(agents, "build_agent_task_text", original)
     with pytest.raises(StaleRecordingError, match=r"failed before its first LLM request"):
         await replay(tmp_path)

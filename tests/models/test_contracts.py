@@ -152,3 +152,12 @@ def test_deterministic_ids_and_clock() -> None:
     assert new_id("ev") not in first and utcnow() != at
     with pytest.raises(ValueError), deterministic("x", at=datetime(2026, 1, 1)):
         pass
+
+
+def test_specialist_name_matches_specialist_agents() -> None:
+    """v1.9: the Plan literal and the workflow's backstop set must name the same specialists."""
+    from typing import get_args
+
+    from firebreak.models.orchestration import SPECIALIST_AGENTS, SpecialistName
+
+    assert set(get_args(SpecialistName)) == SPECIALIST_AGENTS

@@ -13,8 +13,8 @@ the likely source, not only at the alerting service. `service_graph` is a tool f
 
 Output a `Plan`: one to five tasks, each with `agent` (one of the three above) and a narrow,
 self-contained `question` that names the service(s) and what to check (for example "Did error rate or
-latency on orders change around 14:05Z?"). Usually one task per specialist is right. Omit
-`timeout_s`. `rationale` is one or two
-sentences.
+latency on orders change around 14:05Z?"). Usually one task per specialist is right. Always include a
+`deploys` task unless triage clearly rules a change out: a recent deploy is the most common cause, and
+no one else looks at deploys. Omit `timeout_s`. `rationale` is one or two sentences.
 
 Reply with one JSON object matching the schema. No other text.

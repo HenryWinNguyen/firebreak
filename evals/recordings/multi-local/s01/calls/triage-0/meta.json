@@ -2,15 +2,15 @@
   "format_version": 1,
   "agent": "multi-local",
   "scenario": "s01/triage-0",
-  "seed": "s01/triage-0@2026-11-15T22:18:56.002056+00:00",
-  "at": "2026-11-15T22:18:56.002056Z",
+  "seed": "s01/triage-0@2026-11-16T05:36:22.956279+00:00",
+  "at": "2026-11-16T05:36:22.956279Z",
   "models": [
     "qwen3:8b"
   ],
   "prompt_sha256": "f81e040570c60762b1eb8e3aa311a16203439b1e6ed06cbc23f58a1b86eff745",
   "llm_steps": [
-    "1cf8cc4fd2bdda02efe2a1622d9247b48a1ce967d243225dbb6bea64cbbe0159"
+    "92dd25f4a7bc41faf973e3c71e268dc7b4f949e794b6a0e2b49c6664992073c7"
   ],
   "tool_calls": 0,
-  "recorded_on": "2026-11-15"
+  "recorded_on": "2026-11-16"
 }
