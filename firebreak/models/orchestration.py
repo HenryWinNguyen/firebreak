@@ -35,8 +35,8 @@ ACTIVITY_SET_INCIDENT_STATE = "set_incident_state"
 #: Sent with signal-with-start by ingest, so the first alert also starts the workflow.
 SIGNAL_ALERT_ADDED = "alert_added"
 
-#: Specialists a ``Plan`` may name (v1.8). The workflow drops tasks naming anything else (a local
-#: model once planned the tool ``service_graph`` as an agent) and lists them in the outcome.
+#: Specialists a ``Plan`` may name (v1.8). Since v1.9 the schema enforces this (``SpecialistName``);
+#: the workflow's drop filter on this set is only a backstop.
 SPECIALIST_AGENTS = frozenset({"metrics", "logs", "deploys"})
 #: v1.9: ``SpecialistTask.agent`` is this literal, so a plan naming anything else fails validation
 #: and the runtime repair step sends it back to the model. Keep in sync with SPECIALIST_AGENTS.

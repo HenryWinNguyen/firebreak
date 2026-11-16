@@ -269,7 +269,7 @@ async def test_plan_naming_a_non_specialist_escalates() -> None:
     plan = plan_raw(("metrics", "q"), ("service_graph", "q"))
     out, stub = await run_incident({**HAPPY, "supervisor": plan})
     assert out.final_state == IncidentState.ESCALATED
-    assert out.error is not None and "supervisor" in out.error
+    assert out.error is not None and "supervisor" in out.error and "agent" in out.error
     assert out.dropped_tasks == []
     assert stub.calls == ["triage", "supervisor"]
 
@@ -277,7 +277,7 @@ async def test_plan_naming_a_non_specialist_escalates() -> None:
 async def test_plan_with_empty_question_escalates() -> None:
     out, stub = await run_incident({**HAPPY, "supervisor": plan_raw(("metrics", ""))})
     assert out.final_state == IncidentState.ESCALATED
-    assert out.error is not None and "supervisor" in out.error
+    assert out.error is not None and "supervisor" in out.error and "question" in out.error
     assert stub.calls == ["triage", "supervisor"]
 
 
