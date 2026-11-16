@@ -5,10 +5,37 @@ milestone plan (M0–M13) and [ARCHITECTURE.md](./ARCHITECTURE.md) for design.
 
 ## Current status
 
-**M5 in progress: multi-agent path records and replays; first `multi-local` scenario (S1) recorded and it missed (the supervisor never planned `deploys`). Next: supervisor planning fix, then S2–S6. CP1 passed 2026-11-14.** M1–M4 done (S7 waits on T-053). CP0 passed 2026-10-27. Paid Claude run optional (T-042). Board: `docs/tasks/BOARD.md`.
+**M5 in progress: `multi-local` recorded for S1–S6 and ties the single-agent baseline (top-1 2/6, top-3 3/6), with 0 invalid reports vs the baseline's 2. Next: stop the synthesizer over-ranking `bad_deploy`, then the open minors. CP1 passed 2026-11-14.** M1–M4 done (S7 waits on T-053). CP0 passed 2026-10-27. Paid Claude run optional (T-042). Board: `docs/tasks/BOARD.md`.
 Repo: https://github.com/HenryWinNguyen/firebreak (public).
 
 ## Log
+
+### 2026-11-16 (overnight): T-069 merged; multi-local S1–S6 recorded
+- **T-069 (#96, lead, contracts v1.9, approved by Henry 2026-11-15)**: `SpecialistTask.agent` is now
+  `Literal["metrics", "logs", "deploys"]` and `question` must be non-empty, so a bad plan goes back to the model
+  through the repair step (the v1.8 drop filter stays as a backstop). The supervisor prompt now asks for a `deploys`
+  task unless triage rules a change out. `docs/tasks/T-069.md` was added so CI gate G2 could check the branch.
+- **S1 re-recorded: now a top-1 hit** (supervisor planned deploys and metrics; 540 s, 12 LLM steps).
+- **S2–S6 recorded live, $0** (qwen3:8b, 16k context, one scenario at a time). Each recording replays identically
+  and was scanned for secrets (pattern scan plus every `.env` value): no hits. No out-of-memory events.
+- **Result (`evals/REPORT.md`):**
+
+  | | top-1 | top-3 | invalid reports | latency p50 |
+  |---|---|---|---|---|
+  | baseline-local | 2/6 | 3/6 | 2 (S5, S6) | 180 s |
+  | multi-local | 2/6 | 3/6 | 0 | 398 s |
+
+  Hits: S1 and S4 (both agents); S2 top-3 only (both). Multi-local is not more accurate yet, but it always
+  produced a valid report, at about twice the latency (one Ollama serves the specialists one request at a time).
+- **New weakness, caused partly by T-069:** the synthesizer ranks `bad_deploy` first in S2, S3 and S5, where no
+  bad deploy is the cause. Now that every plan includes a deploys task, the deploy history is always in the
+  evidence and the model leans on it. S6 (bad config push) ranked `dependency_failure` first, then
+  `bad_deploy`. I did not tune prompts against these scenarios overnight (that would overfit the eval set, and
+  every prompt change means re-recording all six). Proposed follow-up: the synthesizer must only rank
+  `bad_deploy` when a deploy precedes symptom onset and a finding links the two.
+- **Logs specialist is the weakest agent:** it wrote invalid LogQL (`{..} |= "ERROR" or {..}`, Loki 400) and
+  cited a made-up evidence id in S2, and returned findings without the `agent` field in S4 and S5. Each time it
+  became a degraded source; the workflow handled that as designed.
 
 ### 2026-11-15: T-067, T-068 merged; first multi-agent recording (S1)
 - **T-067 (#90, Opus, high risk)**: `multi-local` records and replays through `IncidentWorkflow`, with one recording
