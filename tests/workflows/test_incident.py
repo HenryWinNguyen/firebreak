@@ -254,25 +254,31 @@ async def test_specialist_without_valid_report_is_degraded() -> None:
     assert out.degraded_sources == ["logs", "deploys"]
 
 
-async def test_unknown_agent_task_dropped_not_degraded() -> None:
-    out, stub = await run_incident({**HAPPY, "supervisor": plan_ok("metrics", "service_graph")})
-    assert out.final_state == IncidentState.REPORT_ONLY
-    assert out.dropped_tasks == ["service_graph"]
-    assert out.degraded_sources == []
-    assert "service_graph" not in stub.calls
-    synth_ctx = stub.contexts["synthesizer"]
-    assert synth_ctx.plan is not None
-    assert [t.agent for t in synth_ctx.plan.tasks] == ["metrics"]
+def plan_raw(*tasks: tuple[str, str]) -> Behavior:
+    """A supervisor output that the v1.9 ``Plan`` schema rejects (built as a dict, not a model)."""
+
+    def fn(task: AgentTask) -> AgentRunResult:
+        out = {"tasks": [{"agent": a, "question": q} for a, q in tasks], "rationale": "r"}
+        return _run(task, out)
+
+    return fn
 
 
-async def test_plan_with_no_known_specialist_escalates() -> None:
-    out, stub = await run_incident({**HAPPY, "supervisor": plan_ok("service_graph", "traces")})
+async def test_plan_naming_a_non_specialist_escalates() -> None:
+    """v1.9: an unknown agent fails Plan validation (the runtime repair step tried first)."""
+    plan = plan_raw(("metrics", "q"), ("service_graph", "q"))
+    out, stub = await run_incident({**HAPPY, "supervisor": plan})
     assert out.final_state == IncidentState.ESCALATED
-    assert out.dropped_tasks == ["service_graph", "traces"]
-    assert out.degraded_sources == []
-    assert out.error is not None and "no known specialist" in out.error
+    assert out.error is not None and "supervisor" in out.error
+    assert out.dropped_tasks == []
     assert stub.calls == ["triage", "supervisor"]
-    assert stub.states[-1] == IncidentState.ESCALATED
+
+
+async def test_plan_with_empty_question_escalates() -> None:
+    out, stub = await run_incident({**HAPPY, "supervisor": plan_raw(("metrics", ""))})
+    assert out.final_state == IncidentState.ESCALATED
+    assert out.error is not None and "supervisor" in out.error
+    assert stub.calls == ["triage", "supervisor"]
 
 
 async def test_agent_activities_scheduled_with_backoff_and_timeouts() -> None:
